@@ -1,0 +1,31 @@
+[project]
+name = "hyperlite"
+version = "0.1.0"
+description = "Super lightweight immediate-mode renderer with optional CUDA acceleration (Windows)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hyperlite contributors" }]
+keywords = ["rendering", "game", "cuda", "win32", "immediate-mode"]
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"Intended Audience :: Developers",
+	"Operating System :: Microsoft :: Windows",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Topic :: Games/Entertainment",
+	"Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Documentation = "docs/guide.md"
+Source = "."
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []

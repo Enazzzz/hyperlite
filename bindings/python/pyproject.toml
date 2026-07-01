@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "cmake>=3.24", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyperlite"
+version = "0.1.0"
+description = "Super lightweight explicit rendering engine Python bindings"
+requires-python = ">=3.10"

@@ -1,0 +1,96 @@
+# --- CMake / native build ---
+/build/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries & link artifacts
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.obj
+*.o
+*.a
+
+# MSVC
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.opensdf
+*.sdf
+*.ncb
+*.aps
+x64/
+x86/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+*.tlog
+*.lastbuildstate
+*.recipe
+*.deps
+
+# CUDA / NVCC intermediates
+*.cubin
+*.fatbin
+*.cudafe*
+*.ptx
+*.cache
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+/dist/
+/build/lib.*/
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE & editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Local / secrets (never commit) ---
+.env
+.env.*
+*.local
+
+# Keep Cursor project config
+!.cursor/
