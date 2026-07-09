@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 260" fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" aria-label="Hyperlite">
+	<rect width="920" height="260" fill="#000000"/>
+	<g stroke-width="11">
+		<path d="M 42 100 V 200 M 118 100 V 200 M 42 150 H 118"/>
+		<path d="M 142 72 L 172 132 L 202 72 M 172 132 V 200"/>
+		<path d="M 226 100 V 200 M 226 100 H 276 Q 296 100 296 126 Q 296 152 276 152 H 226"/>
+		<path d="M 330 100 V 200 M 330 100 H 378 M 330 150 H 368 M 330 200 H 378"/>
+		<path d="M 406 100 V 200 M 406 100 H 456 Q 476 100 476 126 Q 476 152 456 152 H 406 M 456 152 L 488 200"/>
+		<path d="M 510 100 V 200 H 568"/>
+		<path d="M 614 100 V 200 M 596 100 H 632 M 596 200 H 632"/>
+		<path d="M 656 100 H 728 M 692 100 V 200"/>
+		<path d="M 748 100 V 200 M 748 100 H 796 M 748 150 H 786 M 748 200 H 796"/>
+	</g>
+	<g fill="#FFFFFF" stroke="none">
+		<path d="M 80 68 L 92 44 L 104 68 Z"/>
+		<path d="M 80 232 L 92 256 L 104 232 Z"/>
+		<path d="M 172 52 L 184 32 L 196 52 Z"/>
+		<path d="M 692 76 L 704 52 L 716 76 Z"/>
+		<path d="M 692 224 L 704 248 L 716 224 Z"/>
+		<path d="M 768 224 L 780 248 L 792 224 Z"/>
+		<path d="M 460 40 L 472 20 L 484 40 Z"/>
+		<path d="M 460 260 L 472 280 L 484 260 Z"/>
+		<path d="M 12 136 L 0 136 L 16 124 L 16 148 Z"/>
+		<path d="M 908 136 L 920 136 L 904 124 L 904 148 Z"/>
+	</g>
+</svg>

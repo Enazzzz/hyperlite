@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from setuptools import Extension, setup
@@ -42,6 +43,10 @@ def _run_cmake_build() -> None:
 	build_type = os.environ.get("HYPERLITE_BUILD_TYPE", "Release")
 	BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
+	# Always bind the extension to the Python running pip — reusing a CMake cache
+	# built for a different interpreter produces a .pyd linked to the wrong
+	# python3xx.dll (e.g. cp310 tag with python311.dll inside).
+	python_exe = Path(sys.executable).resolve()
 	subprocess.run(
 		[
 			"cmake",
@@ -52,6 +57,7 @@ def _run_cmake_build() -> None:
 			f"-DCMAKE_BUILD_TYPE={build_type}",
 			"-DHYPERLITE_BUILD_PYTHON_BINDINGS=ON",
 			"-DHYPERLITE_ENABLE_CUDA=ON",
+			f"-DPython3_EXECUTABLE={python_exe}",
 		],
 		check=True,
 	)
@@ -66,9 +72,14 @@ class CMakeBuildExt(build_ext):
 	"""Run CMake when needed and stage hyperlite.pyd for wheel/install."""
 
 	def run(self) -> None:
-		if _find_pyd() is None:
-			print("[hyperlite] Building native extension with CMake...")
-			_run_cmake_build()
+		# Rebuild when the invoking interpreter changes (CMake cache is per-tree).
+		print(f"[hyperlite] Building for Python {sys.executable}")
+		if _find_pyd() is not None:
+			# Force relink against the current Python — stale .pyd may be cached.
+			for path in BUILD_DIR.rglob(PYD_NAME):
+				path.unlink(missing_ok=True)
+		print("[hyperlite] Building native extension with CMake...")
+		_run_cmake_build()
 
 		pyd = _find_pyd()
 		if pyd is None:

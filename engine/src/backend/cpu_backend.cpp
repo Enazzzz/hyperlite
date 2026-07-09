@@ -1,5 +1,6 @@
 #include "engine/backend_interface.hpp"
 
+#include "engine/atlas_store.hpp"
 #include "engine/rasterizer.hpp"
 
 namespace hyperlite {
@@ -11,8 +12,8 @@ namespace {
  */
 class CpuBackend final : public IRenderBackend {
 public:
-	void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer) override {
-		raster::ExecuteCommandBuffer(command_buffer, framebuffer);
+	void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer, const AtlasStore& atlases) override {
+		raster::ExecuteCommandBuffer(command_buffer, framebuffer, atlases);
 	}
 
 	std::string_view Name() const override {

@@ -25,6 +25,7 @@ if(MSVC)
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/Gy>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/fp:fast>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/arch:AVX2>
+		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/openmp>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/GL>
 	)
 	add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -46,7 +47,11 @@ endif()
 
 add_library(hyperlite_engine STATIC
 	engine/src/core/frame_loop.cpp
+	engine/src/core/atlas_store.cpp
+	engine/src/core/retained_layer.cpp
+	engine/src/core/command_buffer_sort.cpp
 	engine/src/platform/win32_window.cpp
+	engine/src/platform/dxgi_presenter.cpp
 	engine/src/backend/cpu_backend.cpp
 	engine/src/backend/backend_selector.cpp
 	engine/src/backend/cuda_backend.cpp
@@ -105,6 +110,14 @@ if(HYPERLITE_BUILD_BENCHMARKS)
 	add_executable(gpu_scene_bench benchmarks/gpu_scene_bench.cpp)
 	target_link_libraries(gpu_scene_bench PRIVATE hyperlite_engine)
 	set_property(TARGET gpu_scene_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+	add_executable(gpu_blit_bench benchmarks/gpu_blit_bench.cpp)
+	target_link_libraries(gpu_blit_bench PRIVATE hyperlite_engine)
+	set_property(TARGET gpu_blit_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+	add_executable(cpu_line_bench benchmarks/cpu_line_bench.cpp)
+	target_link_libraries(cpu_line_bench PRIVATE hyperlite_engine)
+	set_property(TARGET cpu_line_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
 if(HYPERLITE_BUILD_TESTS)

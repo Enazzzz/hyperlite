@@ -1,3 +1,7 @@
+# =============================================================================
+# Hyperlite — C++ / CMake / CUDA / Python (Windows)
+# =============================================================================
+
 # --- CMake / native build ---
 /build/
 /out/
@@ -6,8 +10,13 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+CMakePresets.json.user
 
-# Compiled binaries & link artifacts
+# --- Compiled binaries & link artifacts ---
 *.exe
 *.dll
 *.pyd
@@ -23,8 +32,10 @@ Makefile
 *.obj
 *.o
 *.a
+*.manifest
+*.rsp
 
-# MSVC
+# --- MSVC / Visual Studio ---
 .vs/
 *.sln
 *.vcxproj
@@ -48,12 +59,13 @@ MinSizeRel/
 *.recipe
 *.deps
 
-# CUDA / NVCC intermediates
+# --- CUDA / NVCC intermediates ---
 *.cubin
 *.fatbin
 *.cudafe*
 *.ptx
 *.cache
+*.cu.cache
 
 # --- Python ---
 __pycache__/
@@ -61,18 +73,32 @@ __pycache__/
 *$py.class
 *.pyo
 .Python
+*.egg
 *.egg-info/
 .eggs/
 /dist/
-/build/lib.*/
 pip-wheel-metadata/
 *.whl
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
 
 # Virtual environments
 .venv/
 venv/
 env/
 ENV/
+
+# Local editable / wheel build output (pip install .)
+/build/lib.*/
+hyperlite.egg-info/
 
 # --- IDE & editors ---
 .vscode/
@@ -91,6 +117,13 @@ Desktop.ini
 .env
 .env.*
 *.local
+*.key
+*.pem
+credentials.json
 
-# Keep Cursor project config
-!.cursor/
+# --- Cursor project config (keep rules/commands; ignore local noise) ---
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/commands/
+!.cursor/commands/**

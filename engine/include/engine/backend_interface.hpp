@@ -4,6 +4,7 @@
 #include <memory>
 #include <string_view>
 
+#include "engine/atlas_store.hpp"
 #include "engine/command_buffer.hpp"
 #include "engine/framebuffer.hpp"
 
@@ -16,9 +17,11 @@ namespace hyperlite {
  * host->device upload, kernel execution, and device->host readback.
  */
 struct GpuTimings {
+	float record_ms = 0.0f;
 	float upload_ms = 0.0f;
 	float kernel_ms = 0.0f;
 	float readback_ms = 0.0f;
+	float present_ms = 0.0f;
 };
 
 /**
@@ -38,7 +41,29 @@ public:
 	/**
 	 * Execute draw commands into target framebuffer.
 	 */
-	virtual void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer) = 0;
+	virtual void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer, const AtlasStore& atlases) = 0;
+
+	/**
+	 * Upload atlas pixels to backend-resident memory when supported.
+	 */
+	virtual void EnsureAtlasResident(int /*handle*/, const std::uint8_t* /*src*/, std::size_t /*bytes*/, int /*width*/, int /*height*/) {}
+
+	/**
+	 * Upload a full RGBA8 framebuffer image to the backend render target.
+	 */
+	virtual void UploadFramebuffer(FrameBuffer& /*framebuffer*/, const std::uint8_t* /*src*/, std::size_t /*bytes*/) {}
+
+	/**
+	 * Blit an RGBA8 image onto the backend render target at destination offset.
+	 */
+	virtual void BlitRgba(
+		FrameBuffer& /*framebuffer*/,
+		const std::uint8_t* /*src*/,
+		std::size_t /*bytes*/,
+		int /*dst_x*/,
+		int /*dst_y*/,
+		int /*width*/,
+		int /*height*/) {}
 
 	/**
 	 * Make the host-side framebuffer reflect the latest render.
@@ -113,12 +138,27 @@ public:
 	}
 
 	/**
+	 * Clear the device framebuffer and raster packed int32 line segments on device.
+	 *
+	 * segments is line_count * 4 values: x0,y0,x1,y1 per segment. Returns the
+	 * number of segments drawn, or -1 when the GPU-native path is unavailable.
+	 */
+	virtual int TickLinesDevice(
+		std::uint32_t /*clear_packed*/,
+		const std::int32_t* /*segments*/,
+		std::size_t /*line_count*/,
+		std::uint32_t /*line_color*/,
+		int /*line_width*/) {
+		return -1;
+	}
+
+	/**
 	 * Timing breakdown of the most recently completed frame.
 	 */
 	virtual GpuTimings LastTimings() const { return {}; }
 
 	/**
-	 * Enable/disable one-frame-deep present pipelining (GPU backends only).
+	 * Enable/disable one-frame-deep present pipelining (CPU and GPU backends).
 	 */
 	virtual void SetPipelined(bool /*enabled*/) {}
 
@@ -127,6 +167,21 @@ public:
 	 * now (or nullptr when unsupported / on the first frame).
 	 */
 	virtual const std::uint8_t* PresentPipelined(std::size_t /*bytes*/) { return nullptr; }
+
+	/**
+	 * Whether the backend can present without a CPU readback path.
+	 */
+	virtual bool SupportsDirectPresent() const { return false; }
+
+	/**
+	 * Present the latest GPU render target directly to the swapchain.
+	 */
+	virtual bool PresentDirect() { return false; }
+
+	/**
+	 * Bind a DXGI presenter used for GPU-direct presentation.
+	 */
+	virtual void BindDxgiPresenter(void* /*presenter*/) {}
 };
 
 /**

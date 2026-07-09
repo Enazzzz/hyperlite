@@ -1,7 +1,5 @@
 #include "engine/backend_interface.hpp"
 
-#include "engine/rasterizer.hpp"
-
 #if HYPERLITE_HAS_CUDA
 #include "engine/cuda/cuda_context.hpp"
 #endif
@@ -25,13 +23,34 @@ public:
 		context_.EnsureSized(width, height);
 	}
 
-	void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer) override {
+	void Render(const CommandBuffer& command_buffer, FrameBuffer& framebuffer, const AtlasStore& atlases) override {
 		context_.EnsureSized(framebuffer.Width(), framebuffer.Height());
-		context_.RenderCommands(command_buffer.Data(), command_buffer.Size());
+		context_.RenderFrame(command_buffer, atlases);
 	}
 
 	void ReadbackToHost(FrameBuffer& framebuffer) override {
 		context_.ReadbackToHost(framebuffer.Data(), framebuffer.SizeBytes());
+	}
+
+	void EnsureAtlasResident(
+		const int handle,
+		const std::uint8_t* src,
+		const std::size_t bytes,
+		const int width,
+		const int height) override {
+		context_.EnsureAtlasResident(handle, src, bytes, width, height);
+	}
+
+	void BindDxgiPresenter(void* presenter) override {
+		context_.BindDxgiPresenter(presenter);
+	}
+
+	bool SupportsDirectPresent() const override {
+		return context_.Valid() && context_.HasDxgiPresenter();
+	}
+
+	bool PresentDirect() override {
+		return context_.PresentDirect();
 	}
 
 	std::string_view Name() const override {
@@ -78,6 +97,15 @@ public:
 		return context_.SpiroSceneFrameDirect(width, height, instances, segments, phase, dt, clear_packed);
 	}
 
+	int TickLinesDevice(
+		const std::uint32_t clear_packed,
+		const std::int32_t* segments,
+		const std::size_t line_count,
+		const std::uint32_t line_color,
+		const int line_width) override {
+		return context_.TickLinesFrame(clear_packed, segments, line_count, line_color, line_width);
+	}
+
 	GpuTimings LastTimings() const override {
 		return context_.LastTimings();
 	}
@@ -110,7 +138,6 @@ std::unique_ptr<IRenderBackend> CreateCudaBackendOrFallback() {
 			return backend;
 		}
 	}
-	// No usable CUDA device/context: keep rendering correct on the CPU.
 	return CreateCpuBackend();
 }
 

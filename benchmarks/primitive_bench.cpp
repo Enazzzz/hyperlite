@@ -28,11 +28,13 @@ int main() {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int frame = 0; frame < frame_iterations; ++frame) {
 		engine.BeginFrame();
-		engine.PushCommand({hyperlite::CommandType::kClear, 0, 0, 0, 0, hyperlite::PackColor({0, 0, 0, 255})});
+		engine.PushCommand(hyperlite::MakeDrawCommand(
+			hyperlite::CommandType::kClear, 0, 0, 0, 0, hyperlite::PackColor({0, 0, 0, 255})));
 		for (int i = 0; i < draw_calls_per_frame; ++i) {
 			const int x = (i * 37) % 1280;
 			const int y = (i * 53) % 720;
-			engine.PushCommand({hyperlite::CommandType::kPutPixel, x, y, 0, 0, hyperlite::PackColor({255, 140, 40, 255})});
+			engine.PushCommand(hyperlite::MakeDrawCommand(
+				hyperlite::CommandType::kPutPixel, x, y, 0, 0, hyperlite::PackColor({255, 140, 40, 255})));
 		}
 		engine.EndFrame();
 	}
