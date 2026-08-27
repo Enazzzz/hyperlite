@@ -24,7 +24,6 @@ from typing import Iterable
 
 import hyperlite
 import numpy as np
-from PIL import Image
 
 # Virtual-key codes shared by Win32 and the X11 mapper.
 VK_CONTROL = 0x11
@@ -832,6 +831,8 @@ def _still_poses(world: ProcWorld) -> dict[str, tuple[np.ndarray, np.ndarray]]:
 
 def _save_framebuffer_png(engine: hyperlite.Engine, width: int, height: int, path: str) -> None:
 	"""Write the host RGBA8 framebuffer to a PNG file."""
+	from PIL import Image
+
 	view = engine.framebuffer_ptr()
 	rgba = np.frombuffer(view, dtype=np.uint8, count=width * height * 4).reshape(height, width, 4)
 	Image.fromarray(rgba, mode="RGBA").save(path)
