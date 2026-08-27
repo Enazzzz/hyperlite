@@ -45,11 +45,16 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 - Flat `draw_mesh` unchanged; invalid mesh/atlas handles are no-ops
 - See [3d-meshes.md](3d-meshes.md)
 
-## Layer 3 — Portable GPU
+## Further speed (not a second renderer)
 
-- CPU remains the default and correctness path
-- CUDA fast path where available
-- Vulkan (or similar) for cross-vendor GPU later
+Hyperlite’s renderer **owns all pixels**. Present is a **copy** of our RGBA8 (+ depth) into the window via the existing blit path (DXGI / X11 / GDI) — not a second rasterizer.
+
+Further speedups stay inside that ownership model:
+
+- **(a)** More CPU SIMD / tiling in *our* raster
+- **(b)** Optional CUDA (or similar **compute**) kernels that write the **same** RGBA8 + depth framebuffer Hyperlite already owns, then present those bytes through the existing window blit
+
+**Out of scope forever as a graphics backend:** Vulkan, OpenGL, D3D, Metal, or any API that takes over rasterization / owns the swapchain as the renderer. Compute that fills Hyperlite’s buffers is fine; a second GPU graphics pipeline is not.
 
 ## Non-goals (v1)
 
@@ -58,6 +63,7 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 - PBR / material system
 - Custom shader language
 - Skeletal animation
+- Vulkan / OpenGL / D3D / Metal (or any graphics API that replaces our raster)
 
 ## API sketch (Python)
 
