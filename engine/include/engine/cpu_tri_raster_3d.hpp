@@ -7,6 +7,7 @@
 #include "engine/framebuffer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +15,7 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
-#if defined(__AVX2__)
+#if defined(__AVX512F__) || defined(__AVX2__)
 #include <immintrin.h>
 #elif defined(__SSE4_2__)
 #include <nmmintrin.h>
@@ -419,6 +420,50 @@ inline void ShadeAndStoreTriPixel(
 	dirty_y1 = std::max(dirty_y1, y);
 }
 
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+/**
+ * AVX-512VL: 8-wide opaque flat fill using k-masks on ymm (no zmm).
+ *
+ * Same lane width as AVX2; mask registers avoid movemask/cast round-trips.
+ * 16-wide zmm fill was measured slower on this VM (see docs/simd-tri-fill.md).
+ */
+inline int FillOpaqueFlatBlock8Vl(
+	std::uint32_t* row_dst,
+	float* row_depth,
+	const __m256 w0,
+	const __m256 w1,
+	const __m256 w2,
+	const __m256 z_win,
+	const __m256i color_i,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth) {
+	const __m256 zero = _mm256_setzero_ps();
+	const __mmask8 m0 =
+		tl0 ? _mm256_cmp_ps_mask(w0, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w0, zero, _CMP_GT_OQ);
+	const __mmask8 m1 =
+		tl1 ? _mm256_cmp_ps_mask(w1, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w1, zero, _CMP_GT_OQ);
+	const __mmask8 m2 =
+		tl2 ? _mm256_cmp_ps_mask(w2, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w2, zero, _CMP_GT_OQ);
+	__mmask8 cov = static_cast<__mmask8>(m0 & m1 & m2);
+	if (cov == 0) {
+		return 0;
+	}
+	if (has_depth && row_depth != nullptr) {
+		const __m256 d = _mm256_loadu_ps(row_depth);
+		const __mmask8 pass = _mm256_cmp_ps_mask(z_win, d, _CMP_LE_OQ);
+		cov = static_cast<__mmask8>(cov & pass);
+		if (cov == 0) {
+			return 0;
+		}
+		_mm256_mask_storeu_ps(row_depth, cov, z_win);
+	}
+	_mm256_mask_storeu_epi32(reinterpret_cast<int*>(row_dst), cov, color_i);
+	return static_cast<int>(cov);
+}
+#endif // __AVX512F__ && __AVX512VL__
+
 #if defined(__AVX2__)
 /**
  * AVX2: 8-wide opaque flat fill (coverage + depth test/write + color store).
@@ -538,15 +583,19 @@ inline void ExpandDirtyFromMask(
 	if (mask == 0) {
 		return;
 	}
+	(void)width_bits;
 	touched = true;
 	dirty_y0 = std::min(dirty_y0, y);
 	dirty_y1 = std::max(dirty_y1, y);
-	for (int i = 0; i < width_bits; ++i) {
-		if ((mask & (1 << i)) != 0) {
-			const int x = x0 + i;
-			dirty_x0 = std::min(dirty_x0, x);
-			dirty_x1 = std::max(dirty_x1, x);
-		}
+	// Bitscan over written lanes (sparse edge blocks benefit most).
+	// std::countr_zero is portable (MSVC has no __builtin_ctz).
+	unsigned m = static_cast<unsigned>(mask);
+	while (m != 0U) {
+		const int i = static_cast<int>(std::countr_zero(m));
+		const int x = x0 + i;
+		dirty_x0 = std::min(dirty_x0, x);
+		dirty_x1 = std::max(dirty_x1, x);
+		m &= m - 1U;
 	}
 }
 
@@ -559,7 +608,8 @@ inline void ExpandDirtyFromMask(
  * Textured: perspective-correct UV (u/w,v/w,1/w), nearest clamp sample; a==0 skips.
  *
  * Hot path: incremental edge/attribute setup, trivial tile reject vs half-planes,
- * then AVX2 8-wide (or SSE4.2 4-wide) opaque flat blocks with scalar remainder.
+ * then opaque flat blocks: AVX-512VL 8-wide k-masks when available, else AVX2 /
+ * SSE4.2, with scalar remainder. Textured stays scalar (gather SIMD lost here).
  */
 inline void RasterScreenTriTile(
 	std::uint32_t* dst,
@@ -753,6 +803,20 @@ inline void RasterScreenTriTile(
 					const __m256 w1v = _mm256_add_ps(_mm256_set1_ps(w1), a1_lane);
 					const __m256 w2v = _mm256_add_ps(_mm256_set1_ps(w2), a2_lane);
 					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+					const int written = FillOpaqueFlatBlock8Vl(
+						row_dst + x,
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						color_i,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth);
+#else
 					const int written = FillOpaqueFlatBlock8(
 						row_dst + x,
 						has_depth ? (row_depth + x) : nullptr,
@@ -765,6 +829,7 @@ inline void RasterScreenTriTile(
 						e1.top_left,
 						e2.top_left,
 						has_depth);
+#endif
 #elif defined(__SSE4_2__)
 					const __m128 w0v = _mm_add_ps(_mm_set1_ps(w0), a0_lane);
 					const __m128 w1v = _mm_add_ps(_mm_set1_ps(w1), a1_lane);

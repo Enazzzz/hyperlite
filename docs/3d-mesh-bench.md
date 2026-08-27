@@ -8,7 +8,7 @@ Measured on the Hyperlite Linux cloud VM (same class as [linux-bench.md](linux-b
 |------|-------|
 | OS | Ubuntu 24.04 (linux 6.12.x) |
 | CPU | Intel Xeon (KVM), 4 cores |
-| ISA | x86_64 with AVX2 (`-march=native`) |
+| ISA | x86_64 with AVX2 + AVX-512 (`-march=native`) |
 | Compiler | g++ 13.3.0 |
 | OpenMP | 4.5 (4 threads) — tile parallel over 64×64 bins |
 | Present | headless |
@@ -21,11 +21,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHYPERLITE_ENABLE_CUDA=OFF -DCMA
 cmake --build build -j
 ```
 
-## Results (SIMD fill PR)
+## Results
 
 Workload: **120 frames @ 1280×720**, vsync off, headless, depth on, backface cull on, perspective camera. Same 70×70 quad grid (9 800 tris) for flat and textured.
 
-Paired **before/after on this VM** (`main` vs SIMD fill, back-to-back):
+### AVX2 SIMD fill PR (vs pre-SIMD main)
 
 | Bench | Path | Tris/frame | Before | After |
 |-------|------|------------|--------|-------|
@@ -33,7 +33,15 @@ Paired **before/after on this VM** (`main` vs SIMD fill, back-to-back):
 | `cpu_mesh_bench` (flat) | `TickMesh` | 9 800 | **4.80e6** | **~5.1e6** (~+6%) |
 | `cpu_mesh_bench` (textured) | `TickMeshTextured` | 9 800 | **4.71e6** | **~5.1e6** (~+9%) |
 
-Mesh uplift is smaller than immediate: the 70×70 grid is more transform/clip/bin bound relative to fill. Textured still benefits from incremental `u/w`,`v/w`,`1/w` and shared tile reject/accept. See [simd-tri-fill.md](simd-tri-fill.md).
+### AVX-512VL follow-up (vs AVX2 main, interleaved 8 pairs)
+
+| Bench | Path | Before | After | Δ |
+|-------|------|--------|-------|---|
+| `cpu_tri_bench` (immediate) | `TickTris3d` | **3.69e6** | **3.79e6** | **~+2.7%** |
+| `cpu_mesh_bench` (flat) | `TickMesh` | **~5.45e6** | **~5.46e6** | **~flat** |
+| `cpu_mesh_bench` (textured) | `TickMeshTextured` | **~5.26e6** | **~5.24e6** | **~flat** |
+
+Mesh stays transform/clip/bin bound relative to fill; AVX-512VL edge masks + bitscan help the immediate path more. Textured gather SIMD was tried and dropped (scalar UV still wins). See [simd-tri-fill.md](simd-tri-fill.md).
 
 Notes:
 

@@ -51,7 +51,7 @@ else()
 		add_compile_options(
 			$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-march=${HYPERLITE_MARCH}>
 		)
-		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH} (AVX2 used only when the arch enables __AVX2__).")
+		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH} (AVX2 / AVX-512VL opaque fill only when the arch enables those macros).")
 	endif()
 endif()
 
