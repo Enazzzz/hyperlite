@@ -498,6 +498,16 @@ inline bool TriTileDepthReject(const ScreenTri& tri, const float tile_max_depth)
 }
 
 /**
+ * Tile reject when tri_min (cached vertex minimum) is behind tile_max.
+ */
+inline bool TriTileDepthRejectMin(const float tri_min_depth, const float tile_max_depth) {
+	if (tile_max_depth >= 1.0f) {
+		return false;
+	}
+	return tri_min_depth > tile_max_depth;
+}
+
+/**
  * Fold farthest depth written by one triangle into the tile Hi-Z occluder.
  */
 inline void MergeTileHiZFromWrite(
@@ -1396,8 +1406,10 @@ struct MeshDrawScratch {
 	std::vector<ScreenTri> screen{};
 	/** 64×64 tile → triangle index lists (capacity retained across frames). */
 	std::vector<std::vector<std::uint32_t>> bins{};
-	/** Per-tile max stored window depth for Hi-Z reject (size = tile_count, reset each draw). */
+	/** Per-tile max stored window depth for Hi-Z reject (persisted across draws until depth clear). */
 	std::vector<float> tile_max_depth{};
+	/** TileHiZEpoch() value when tile_max_depth was last reset to far (1.0). */
+	std::uint32_t tile_hiz_epoch = 0U;
 	/** Front-to-back permutation into `screen` / draw tri list (reused each RasterScreenTrisTiled). */
 	std::vector<std::uint32_t> tri_order{};
 	/** Cached min window depth per tri (parallel to tri_order / draw list). */
@@ -1741,9 +1753,10 @@ inline bool TrisLookUniformDepthSample(const std::vector<ScreenTri>& tris) {
  *
  * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
  * behind that occluder skip the pixel loop. tile_max advances from write tracking (no
- * per-triangle 64×64 depth rescan). When depth is on and the draw has meaningful
- * overlap depth variation (not uniform-depth mesh, not occluder-prefix), tris are
- * sorted front-to-back before binning so nearer surfaces update tile_max first.
+ * per-triangle 64×64 depth rescan). tile_max_depth persists across RasterScreenTrisTiled
+ * calls until depth is cleared (TileHiZEpoch bump). When depth is on and the draw has
+ * meaningful overlap depth variation (not uniform-depth mesh, not occluder-prefix), tris
+ * are sorted front-to-back before binning so nearer surfaces update tile_max first.
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -1771,10 +1784,14 @@ inline void RasterScreenTrisTiled(
 	}
 
 	auto& tile_max_depth = scratch.tile_max_depth;
-	if (static_cast<int>(tile_max_depth.size()) != tile_count) {
-		tile_max_depth.assign(static_cast<std::size_t>(tile_count), 1.0f);
-	} else {
-		std::fill(tile_max_depth.begin(), tile_max_depth.end(), 1.0f);
+	const std::uint32_t hiz_epoch = TileHiZEpoch();
+	if (scratch.tile_hiz_epoch != hiz_epoch || static_cast<int>(tile_max_depth.size()) != tile_count) {
+		if (static_cast<int>(tile_max_depth.size()) != tile_count) {
+			tile_max_depth.assign(static_cast<std::size_t>(tile_count), 1.0f);
+		} else {
+			std::fill(tile_max_depth.begin(), tile_max_depth.end(), 1.0f);
+		}
+		scratch.tile_hiz_epoch = hiz_epoch;
 	}
 
 	const bool depth_on = depth != nullptr && depth->Allocated();
@@ -1854,10 +1871,15 @@ inline void RasterScreenTrisTiled(
 		const int x1 = std::min(x0 + kTile, width);
 		const int y1 = std::min(y0 + kTile, height);
 		float& tile_max = tile_max_depth[static_cast<std::size_t>(tile)];
-		bool tile_hiz_scanned = false;
+		bool tile_hiz_scanned = depth_on && tile_max < kHiZFarDepth;
 		for (const std::uint32_t idx : list) {
-			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
-				continue;
+			if (tile_hiz_scanned && tile_max < kHiZFarDepth) {
+				const bool reject = sort_front_to_back
+					? TriTileDepthRejectMin(tri_min_depth[idx], tile_max)
+					: TriTileDepthReject(tris[idx], tile_max);
+				if (reject) {
+					continue;
+				}
 			}
 			const float tile_oc =
 				(tile_hiz_scanned && tile_max < kHiZFarDepth) ? tile_max : 1.0f;
@@ -1895,10 +1917,15 @@ inline void RasterScreenTrisTiled(
 		const int x1 = std::min(x0 + kTile, width);
 		const int y1 = std::min(y0 + kTile, height);
 		float& tile_max = tile_max_depth[static_cast<std::size_t>(tile)];
-		bool tile_hiz_scanned = false;
+		bool tile_hiz_scanned = depth_on && tile_max < kHiZFarDepth;
 		for (const std::uint32_t idx : list) {
-			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
-				continue;
+			if (tile_hiz_scanned && tile_max < kHiZFarDepth) {
+				const bool reject = sort_front_to_back
+					? TriTileDepthRejectMin(tri_min_depth[idx], tile_max)
+					: TriTileDepthReject(tris[idx], tile_max);
+				if (reject) {
+					continue;
+				}
 			}
 			const float tile_oc =
 				(tile_hiz_scanned && tile_max < kHiZFarDepth) ? tile_max : 1.0f;

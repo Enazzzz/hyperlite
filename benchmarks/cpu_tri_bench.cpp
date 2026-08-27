@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/command_buffer.hpp"
 #include "engine/engine.hpp"
 
 namespace {
@@ -124,9 +125,11 @@ void FillScreenOccluderTris(float* dst) {
  * Benchmark TickTris3d (10k world tris, perspective camera, depth on, 1280x720).
  *
  * Pass argv[1]=="occluded" to prepend a fullscreen occluder (2 tris) before the 10k back-field tris.
+ * Pass argv[1]=="occluded-2draw" for two Raster* calls per frame (clear + occluder draw, then back field).
  */
 int main(int argc, char** argv) {
-	const bool occluded = (argc > 1 && std::string(argv[1]) == "occluded");
+	const bool occluded_2draw = (argc > 1 && std::string(argv[1]) == "occluded-2draw");
+	const bool occluded = occluded_2draw || (argc > 1 && std::string(argv[1]) == "occluded");
 
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Tri Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
@@ -149,20 +152,38 @@ int main(int argc, char** argv) {
 	constexpr std::uint32_t tri_packed = hyperlite::PackColor({0, 200, 255, 255});
 
 	std::vector<float> verts(tris_per_frame * 9U);
+	std::vector<float> occ_verts(occluder_tris * 9U);
+	std::vector<float> back_verts(back_tris * 9U);
 
 	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int frame = 0; frame < frame_iterations; ++frame) {
-		if (occluded) {
+		if (occluded_2draw) {
+			FillScreenOccluderTris(occ_verts.data());
+			FillWorldTris(back_verts.data(), back_tris, frame);
+			engine.BeginFrame();
+			engine.PushCommand(hyperlite::MakeDrawCommand(
+				hyperlite::CommandType::kClear, 0, 0, 0, 0, clear_packed));
+			engine.EndFrame();
+			engine.Tris3d(occ_verts.data(), occluder_tris, tri_packed);
+			engine.Tris3d(back_verts.data(), back_tris, tri_packed);
+			engine.PollEvents();
+			engine.Present();
+		} else if (occluded) {
 			FillScreenOccluderTris(verts.data());
 			FillWorldTris(verts.data() + occluder_tris * 9U, back_tris, frame);
+			engine.TickTris3d(
+				clear_packed,
+				verts.data(),
+				tris_per_frame,
+				tri_packed);
 		} else {
 			FillWorldTris(verts.data(), back_tris, frame);
+			engine.TickTris3d(
+				clear_packed,
+				verts.data(),
+				tris_per_frame,
+				tri_packed);
 		}
-		engine.TickTris3d(
-			clear_packed,
-			verts.data(),
-			tris_per_frame,
-			tri_packed);
 	}
 	const auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -176,6 +197,10 @@ int main(int argc, char** argv) {
 	std::cout << "depth=on\n";
 	if (occluded) {
 		std::cout << "workload=occluded\n";
+	}
+	if (occluded_2draw) {
+		std::cout << "workload=occluded-2draw\n";
+		std::cout << "draws_per_frame=2\n";
 	}
 	std::cout << "total_ms=" << ms << '\n';
 	std::cout << "tris_per_second=" << tris_per_second << '\n';
