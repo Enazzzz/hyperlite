@@ -102,4 +102,4 @@ engine.rect_fill(...)  # HUD, no depth
 engine.tick()
 ```
 
-See [guide.md](guide.md) for call details, [3d-meshes.md](3d-meshes.md) for retained meshes, [3d-wireframe-bench.md](3d-wireframe-bench.md) for line throughput, [3d-tri-bench.md](3d-tri-bench.md) for immediate triangles, and [3d-mesh-bench.md](3d-mesh-bench.md) for retained mesh throughput.
+See [guide.md](guide.md) for call details, [3d-meshes.md](3d-meshes.md) for retained meshes, [3d-wireframe-bench.md](3d-wireframe-bench.md) for line throughput, [3d-tri-bench.md](3d-tri-bench.md) for immediate triangles, [3d-mesh-bench.md](3d-mesh-bench.md) for retained mesh throughput, and [proc-world.md](proc-world.md) for the integrated procedural stress game.
