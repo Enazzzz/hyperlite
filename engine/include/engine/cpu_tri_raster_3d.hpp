@@ -378,6 +378,9 @@ inline float TriMinWindowDepthVertices(ScreenTri tri) {
 
 /**
  * Farthest stored window depth (max sample) in a tile region — conservative Hi-Z occluder.
+ *
+ * Retained for tests / fallback; the tiled raster tracks max depth on write instead of
+ * rescanning the tile after every triangle (see RasterScreenTrisTiled).
  */
 inline float ScanTileMaxDepth(
 	const float* depth_base,
@@ -387,14 +390,77 @@ inline float ScanTileMaxDepth(
 	const int x1,
 	const int y1) {
 	float max_d = 0.0f;
+#if defined(__AVX2__)
+	const __m256 vzero = _mm256_setzero_ps();
+	__m256 vmax = vzero;
+	for (int y = y0; y < y1; ++y) {
+		const float* row = depth_base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+		int x = x0;
+		for (; x + 8 <= x1; x += 8) {
+			const __m256 v = _mm256_loadu_ps(row + x);
+			vmax = _mm256_max_ps(vmax, v);
+		}
+		for (; x < x1; ++x) {
+			max_d = std::max(max_d, row[x]);
+		}
+	}
+	alignas(32) float tmp[8];
+	_mm256_store_ps(tmp, vmax);
+	for (int i = 0; i < 8; ++i) {
+		max_d = std::max(max_d, tmp[i]);
+	}
+#else
 	for (int y = y0; y < y1; ++y) {
 		const float* row = depth_base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
 		for (int x = x0; x < x1; ++x) {
 			max_d = std::max(max_d, row[x]);
 		}
 	}
+#endif
 	return max_d;
 }
+
+/**
+ * Merge one written depth sample into the per-triangle Hi-Z write accumulator.
+ */
+inline void AccumulateDepthWriteMax(float& write_max, const float z) {
+	write_max = (write_max < 0.0f) ? z : std::max(write_max, z);
+}
+
+/**
+ * Max window depth among SIMD lanes that were actually written (bitmask from fill).
+ */
+#if defined(__AVX2__)
+inline void AccumulateMaskedDepthMax8(float& write_max, const __m256 zv, const int mask) {
+	if (mask == 0) {
+		return;
+	}
+	alignas(32) float tmp[8];
+	_mm256_storeu_ps(tmp, zv);
+	unsigned m = static_cast<unsigned>(mask);
+	while (m != 0U) {
+		const int i = static_cast<int>(std::countr_zero(m));
+		AccumulateDepthWriteMax(write_max, tmp[i]);
+		m &= m - 1U;
+	}
+}
+#endif
+
+#if defined(__SSE4_2__)
+inline void AccumulateMaskedDepthMax4(float& write_max, const __m128 zv, const int mask) {
+	if (mask == 0) {
+		return;
+	}
+	alignas(16) float tmp[4];
+	_mm_storeu_ps(tmp, zv);
+	unsigned m = static_cast<unsigned>(mask);
+	while (m != 0U) {
+		const int i = static_cast<int>(std::countr_zero(m));
+		AccumulateDepthWriteMax(write_max, tmp[i]);
+		m &= m - 1U;
+	}
+}
+#endif
 
 /**
  * True when the triangle's nearest window depth is behind every stored sample in the tile.
@@ -407,6 +473,24 @@ inline bool TriTileDepthReject(const ScreenTri& tri, const float tile_max_depth)
 		return false;
 	}
 	return TriMinWindowDepthVertices(tri) > tile_max_depth;
+}
+
+/**
+ * Fold farthest depth written by one triangle into the tile Hi-Z occluder.
+ */
+inline void MergeTileHiZFromWrite(
+	float& tile_max,
+	bool& tile_hiz_active,
+	const float tri_write_max) {
+	if (tri_write_max < 0.0f) {
+		return;
+	}
+	if (!tile_hiz_active) {
+		tile_max = tri_write_max;
+		tile_hiz_active = true;
+	} else {
+		tile_max = std::max(tile_max, tri_write_max);
+	}
 }
 
 /**
@@ -674,6 +758,10 @@ inline void ExpandDirtyFromMask(
  * SSE4.2, with scalar remainder. Textured stays scalar (gather SIMD lost here).
  *
  * Returns true when at least one pixel was written.
+ *
+ * tile_occluder_max: farthest stored depth in this tile (1.0 = no occluder). When less than
+ * far-plane, fully-covered rows whose minimum interpolated z exceeds it skip the pixel loop.
+ * depth_write_max: when non-null, receives the farthest window depth actually written.
  */
 inline bool RasterScreenTriTile(
 	std::uint32_t* dst,
@@ -685,7 +773,9 @@ inline bool RasterScreenTriTile(
 	const int tile_x1,
 	const int tile_y1,
 	ScreenTri tri,
-	PixelBounds& bounds) {
+	PixelBounds& bounds,
+	const float tile_occluder_max = 1.0f,
+	float* depth_write_max = nullptr) {
 	(void)height;
 	// Ensure CCW for half-space signs / top-left rule.
 	float area2 = ScreenSignedArea2(tri.x0, tri.y0, tri.x1, tri.y1, tri.x2, tri.y2);
@@ -743,6 +833,10 @@ inline bool RasterScreenTriTile(
 	const bool has_depth = depth != nullptr && depth->Allocated();
 	float* depth_base = has_depth ? depth->Data() : nullptr;
 	const std::size_t stride = static_cast<std::size_t>(width);
+	constexpr float kHiZFarDepth = 1.0f - 1e-6f;
+	const bool tile_depth_reject =
+		has_depth && tile_occluder_max < kHiZFarDepth;
+	float write_max = -1.0f;
 
 	// Hoist perspective UV numerators (u/w, v/w) for textured path.
 	const float uw0 = tri.u0 * tri.iw0;
@@ -806,6 +900,18 @@ inline bool RasterScreenTriTile(
 		constexpr int kBlock = 4;
 #endif
 		for (int y = iy0; y < iy1; ++y) {
+			if (tile_depth_reject && box_fully_covered) {
+				const float z_end =
+					z_win_row + dz_win_dx * static_cast<float>(ix1 - ix0 - 1);
+				const float z_row_min = (dz_win_dx >= 0.0f) ? z_win_row : z_end;
+				if (z_row_min > tile_occluder_max) {
+					w0_row += e0.b;
+					w1_row += e1.b;
+					w2_row += e2.b;
+					z_win_row += dz_win_dy;
+					continue;
+				}
+			}
 			float w0 = w0_row;
 			float w1 = w1_row;
 			float w2 = w2_row;
@@ -829,6 +935,7 @@ inline bool RasterScreenTriTile(
 						if (written != 0) {
 							_mm256_maskstore_ps(row_depth + x, store_mask, zv);
 							_mm256_maskstore_epi32(reinterpret_cast<int*>(row_dst + x), store_mask, color_i);
+							AccumulateMaskedDepthMax8(write_max, zv, written);
 						}
 					} else {
 						_mm256_storeu_si256(reinterpret_cast<__m256i*>(row_dst + x), color_i);
@@ -852,6 +959,7 @@ inline bool RasterScreenTriTile(
 								}
 							}
 							_mm_storeu_ps(row_depth + x, _mm_load_ps(d_tmp));
+							AccumulateMaskedDepthMax4(write_max, zv, written);
 						}
 					} else {
 						_mm_storeu_si128(reinterpret_cast<__m128i*>(row_dst + x), color_i);
@@ -894,6 +1002,9 @@ inline bool RasterScreenTriTile(
 						e2.top_left,
 						has_depth);
 #endif
+					if (has_depth && written != 0) {
+						AccumulateMaskedDepthMax8(write_max, zv, written);
+					}
 #elif defined(__SSE4_2__)
 					const __m128 w0v = _mm_add_ps(_mm_set1_ps(w0), a0_lane);
 					const __m128 w1v = _mm_add_ps(_mm_set1_ps(w1), a1_lane);
@@ -911,6 +1022,9 @@ inline bool RasterScreenTriTile(
 						e1.top_left,
 						e2.top_left,
 						has_depth);
+					if (has_depth && written != 0) {
+						AccumulateMaskedDepthMax4(write_max, zv, written);
+					}
 #endif
 					ExpandDirtyFromMask(x, y, written, kBlock, touched, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
 					w0 += e0.a * static_cast<float>(kBlock);
@@ -930,6 +1044,7 @@ inline bool RasterScreenTriTile(
 						if (z_win <= slot) {
 							slot = z_win;
 							row_dst[x] = flat_packed;
+							AccumulateDepthWriteMax(write_max, z_win);
 							touched = true;
 							dirty_x0 = std::min(dirty_x0, x);
 							dirty_y0 = std::min(dirty_y0, y);
@@ -980,6 +1095,21 @@ inline bool RasterScreenTriTile(
 		float vw_row = b0_row * vw0 + b1_row * vw1 + b2_row * vw2;
 
 		for (int y = iy0; y < iy1; ++y) {
+			if (tile_depth_reject && box_fully_covered) {
+				const float z_end =
+					z_win_row + dz_win_dx * static_cast<float>(ix1 - ix0 - 1);
+				const float z_row_min = (dz_win_dx >= 0.0f) ? z_win_row : z_end;
+				if (z_row_min > tile_occluder_max) {
+					w0_row += e0.b;
+					w1_row += e1.b;
+					w2_row += e2.b;
+					z_win_row += dz_win_dy;
+					iw_row += diw_dy;
+					uw_row += duw_dy;
+					vw_row += dvw_dy;
+					continue;
+				}
+			}
 			float w0 = w0_row;
 			float w1 = w1_row;
 			float w2 = w2_row;
@@ -1006,6 +1136,7 @@ inline bool RasterScreenTriTile(
 								float& slot = row_depth[x];
 								if (z_win <= slot) {
 									slot = z_win;
+									AccumulateDepthWriteMax(write_max, z_win);
 								} else {
 									pass = false;
 								}
@@ -1095,6 +1226,9 @@ inline bool RasterScreenTriTile(
 	if (touched) {
 		bounds.Expand(dirty_x0, dirty_y0);
 		bounds.Expand(dirty_x1, dirty_y1);
+	}
+	if (depth_write_max != nullptr && write_max >= 0.0f) {
+		*depth_write_max = write_max;
 	}
 	return touched;
 }
@@ -1508,7 +1642,8 @@ inline void EmitScreenTri(
  * min/max (no initializer_list). No per-pixel work in the bin pass.
  *
  * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
- * behind that occluder skip the pixel loop (updated after each raster in tile order).
+ * behind that occluder skip the pixel loop. tile_max advances from write tracking (no
+ * per-triangle 64×64 depth rescan).
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -1543,7 +1678,6 @@ inline void RasterScreenTrisTiled(
 	}
 
 	const bool depth_on = depth != nullptr && depth->Allocated();
-	const float* depth_base = depth_on ? depth->Data() : nullptr;
 	constexpr float kHiZFarDepth = 1.0f - 1e-6f;
 
 	PixelBounds global_bounds{};
@@ -1599,10 +1733,24 @@ inline void RasterScreenTrisTiled(
 			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
 				continue;
 			}
-			if (RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], local)) {
-				if (depth_on && (!tile_hiz_scanned || tile_max < kHiZFarDepth)) {
-					tile_max = ScanTileMaxDepth(depth_base, width, x0, y0, x1, y1);
-					tile_hiz_scanned = true;
+			const float tile_oc =
+				(tile_hiz_scanned && tile_max < kHiZFarDepth) ? tile_max : 1.0f;
+			float tri_write_max = -1.0f;
+			if (RasterScreenTriTile(
+					dst,
+					depth,
+					width,
+					height,
+					x0,
+					y0,
+					x1,
+					y1,
+					tris[idx],
+					local,
+					tile_oc,
+					&tri_write_max)) {
+				if (depth_on) {
+					MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
 				}
 			}
 		}
@@ -1626,10 +1774,24 @@ inline void RasterScreenTrisTiled(
 			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
 				continue;
 			}
-			if (RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], global_bounds)) {
-				if (depth_on && (!tile_hiz_scanned || tile_max < kHiZFarDepth)) {
-					tile_max = ScanTileMaxDepth(depth_base, width, x0, y0, x1, y1);
-					tile_hiz_scanned = true;
+			const float tile_oc =
+				(tile_hiz_scanned && tile_max < kHiZFarDepth) ? tile_max : 1.0f;
+			float tri_write_max = -1.0f;
+			if (RasterScreenTriTile(
+					dst,
+					depth,
+					width,
+					height,
+					x0,
+					y0,
+					x1,
+					y1,
+					tris[idx],
+					global_bounds,
+					tile_oc,
+					&tri_write_max)) {
+				if (depth_on) {
+					MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
 				}
 			}
 		}
