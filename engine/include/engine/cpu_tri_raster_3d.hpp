@@ -1162,8 +1162,9 @@ inline void ProjectFanToScreen(
 /**
  * Per-draw scratch for mesh transform / emit / tile bins (reused across draws).
  *
- * Thread-local so DrawMesh / TickMesh avoid per-frame heap churn. Emit is
- * single-threaded; OpenMP only runs later over tiles.
+ * Process-static via GetMeshDrawScratch() so DrawMesh / TickMesh avoid per-frame heap
+ * churn without TLS (which breaks non-PIC static → Python .so links). Emit + bin setup
+ * run on one thread; OpenMP only reads bins afterward.
  */
 struct MeshDrawScratch {
 	/** Homogeneous clip-space verts after MVP (one per mesh vertex). */
@@ -1182,10 +1183,13 @@ struct MeshDrawScratch {
 };
 
 /**
- * Thread-local mesh scratch (emit path is not OpenMP-parallel).
+ * Process-wide mesh scratch (emit + bin setup are single-threaded before OpenMP fill).
+ *
+ * Not thread_local: TLS in a non-PIC static archive fails when linking the Python .so
+ * (R_X86_64_TPOFF32). OpenMP workers only read bins after this thread finishes binning.
  */
 inline MeshDrawScratch& GetMeshDrawScratch() {
-	thread_local MeshDrawScratch scratch;
+	static MeshDrawScratch scratch;
 	return scratch;
 }
 

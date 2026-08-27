@@ -93,6 +93,8 @@ add_library(hyperlite_engine STATIC ${HYPERLITE_ENGINE_SOURCES})
 
 target_include_directories(hyperlite_engine PUBLIC engine/include)
 target_compile_definitions(hyperlite_engine PUBLIC HYPERLITE_HAS_X11=${HYPERLITE_HAS_X11})
+# Required so the static archive can link into the Python extension (.so / .pyd).
+set_property(TARGET hyperlite_engine PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET hyperlite_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
 if(NOT MSVC)

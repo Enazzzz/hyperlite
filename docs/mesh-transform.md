@@ -23,7 +23,7 @@ In `cpu_tri_raster_3d.hpp` (public API unchanged):
 1. **Transform once per mesh vertex** — `TransformMeshPositions` writes clip-space + outcodes; trivial-in verts are **projected once**. Optional AVX2+FMA 8-wide AoS gather when `__AVX2__ && __FMA__` (native); scalar remainder / `HYPERLITE_MARCH=x86-64`.
 2. **Outcode clip** — `ClipTriangleHomogeneous` trivial accept/reject; mesh emit uses accept → `TryAppendScreenTri` with pre-projected attrs, reject → skip, else Sutherland–Hodgman only.
 3. **Cheaper binning** — nested `min`/`max` (no `initializer_list`); tile lists reused via thread-local scratch (`clear`, keep capacity). Still AABB → tile range only (no per-pixel work).
-4. **Scratch reuse** — `MeshDrawScratch` (clip, outcodes, screen attrs, `ScreenTri` list, bins) is thread-local across `DrawMesh` / `TickMesh` / immediate tris. No OpenMP over triangles (depth races); OpenMP remains over tiles.
+4. **Scratch reuse** — `MeshDrawScratch` (clip, outcodes, screen attrs, `ScreenTri` list, bins) is process-static across `DrawMesh` / `TickMesh` / immediate tris (not `thread_local`: TLS in a non-PIC static archive fails linking the Python `.so`). No OpenMP over triangles (depth races); OpenMP remains over tiles.
 
 `RasterScreenTriTile` fill inner loop untouched.
 
@@ -47,7 +47,7 @@ Portable `HYPERLITE_MARCH=x86-64` (no AVX2 transform): mesh flat still ~**8.1e6*
 |------------|--------|
 | Transform-once + project-once + outcode accept | **Shipped** — primary mesh win |
 | AVX2+FMA 8-wide gather MVP | **Shipped** (gated); small vs scalar once-per-vert on this grid |
-| Thread-local scratch (screen + bins) | **Shipped** |
+| Process-static scratch (screen + bins) | **Shipped** (not TLS — Python `.so` link) |
 | Nested AABB min/max in bin | **Shipped** |
 | OpenMP over triangles | **Not tried** (forbidden without per-tile ownership) |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
