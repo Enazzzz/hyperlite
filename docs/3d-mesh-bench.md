@@ -21,15 +21,19 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHYPERLITE_ENABLE_CUDA=OFF -DCMA
 cmake --build build -j
 ```
 
-## Results (Layer 2.1 PR)
+## Results (SIMD fill PR)
 
 Workload: **120 frames @ 1280×720**, vsync off, headless, depth on, backface cull on, perspective camera. Same 70×70 quad grid (9 800 tris) for flat and textured.
 
-| Bench | Path | Tris/frame | `total_ms` | Throughput |
-|-------|------|------------|------------|------------|
-| `cpu_tri_bench` (immediate) | `TickTris3d` | 10 000 | **598.7** | **2.00e6** tris/s |
-| `cpu_mesh_bench` (flat) | `TickMesh` | 9 800 (70×70 quads) | **229.6** | **5.12e6** tris/s |
-| `cpu_mesh_bench` (textured) | `TickMeshTextured` | 9 800 (70×70 quads) | **240.7** | **4.89e6** tris/s |
+Paired **before/after on this VM** (`main` vs SIMD fill, back-to-back):
+
+| Bench | Path | Tris/frame | Before | After |
+|-------|------|------------|--------|-------|
+| `cpu_tri_bench` (immediate) | `TickTris3d` | 10 000 | **2.33e6** | **3.55e6** (~+52%) |
+| `cpu_mesh_bench` (flat) | `TickMesh` | 9 800 | **4.80e6** | **~5.1e6** (~+6%) |
+| `cpu_mesh_bench` (textured) | `TickMeshTextured` | 9 800 | **4.71e6** | **~5.1e6** (~+9%) |
+
+Mesh uplift is smaller than immediate: the 70×70 grid is more transform/clip/bin bound relative to fill. Textured still benefits from incremental `u/w`,`v/w`,`1/w` and shared tile reject/accept. See [simd-tri-fill.md](simd-tri-fill.md).
 
 Notes:
 

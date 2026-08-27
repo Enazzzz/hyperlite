@@ -14,6 +14,11 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE4_2__)
+#include <nmmintrin.h>
+#endif
 
 namespace hyperlite::raster {
 
@@ -234,12 +239,327 @@ inline std::uint32_t SampleAtlasNearest(
 }
 
 /**
+ * Half-plane edge as E(p) = A*px + B*py + C (pixel-center coordinates).
+ *
+ * Matches EdgeFn(a→b, p): A = ay-by, B = bx-ax, C = -A*ax - B*ay.
+ */
+struct HalfEdgeCoef {
+	float a = 0.0f;
+	float b = 0.0f;
+	float c = 0.0f;
+	bool top_left = false;
+};
+
+/**
+ * Build edge coefficients for oriented edge a→b (same sign as EdgeFn).
+ */
+inline HalfEdgeCoef MakeHalfEdge(
+	const float ax,
+	const float ay,
+	const float bx,
+	const float by) {
+	HalfEdgeCoef e{};
+	e.a = ay - by; // dE/dpx
+	e.b = bx - ax; // dE/dpy
+	e.c = -e.a * ax - e.b * ay;
+	e.top_left = IsTopLeftEdge(ax, ay, bx, by);
+	return e;
+}
+
+/**
+ * Evaluate half-edge at a pixel center.
+ */
+inline float EvalHalfEdge(const HalfEdgeCoef& e, const float px, const float py) {
+	return e.a * px + e.b * py + e.c;
+}
+
+/**
+ * Maximum of E over an inclusive pixel-center AABB (axis-aligned).
+ *
+ * Used for trivial reject: if max is still outside the half-plane, skip the tile.
+ */
+inline float HalfEdgeMaxOverBox(
+	const HalfEdgeCoef& e,
+	const float px_lo,
+	const float px_hi,
+	const float py_lo,
+	const float py_hi) {
+	const float px = (e.a > 0.0f) ? px_hi : px_lo;
+	const float py = (e.b > 0.0f) ? py_hi : py_lo;
+	return EvalHalfEdge(e, px, py);
+}
+
+/**
+ * Minimum of E over an inclusive pixel-center AABB (axis-aligned).
+ *
+ * Used for trivial accept: if min is still inside the half-plane, the box is covered.
+ */
+inline float HalfEdgeMinOverBox(
+	const HalfEdgeCoef& e,
+	const float px_lo,
+	const float px_hi,
+	const float py_lo,
+	const float py_hi) {
+	const float px = (e.a > 0.0f) ? px_lo : px_hi;
+	const float py = (e.b > 0.0f) ? py_lo : py_hi;
+	return EvalHalfEdge(e, px, py);
+}
+
+/**
+ * True when the pixel-center box is entirely outside one half-plane (top-left aware).
+ */
+inline bool HalfEdgeBoxTrivialOut(
+	const HalfEdgeCoef& e,
+	const float px_lo,
+	const float px_hi,
+	const float py_lo,
+	const float py_hi) {
+	const float e_max = HalfEdgeMaxOverBox(e, px_lo, px_hi, py_lo, py_hi);
+	// Top-left: inside if E >= 0 → out if E_max < 0.
+	// Non-top-left: inside if E > 0 → out if E_max <= 0.
+	return e.top_left ? (e_max < 0.0f) : (e_max <= 0.0f);
+}
+
+/**
+ * True when the pixel-center box is entirely inside one half-plane (top-left aware).
+ */
+inline bool HalfEdgeBoxTrivialIn(
+	const HalfEdgeCoef& e,
+	const float px_lo,
+	const float px_hi,
+	const float py_lo,
+	const float py_hi) {
+	const float e_min = HalfEdgeMinOverBox(e, px_lo, px_hi, py_lo, py_hi);
+	return e.top_left ? (e_min >= 0.0f) : (e_min > 0.0f);
+}
+
+/**
+ * Coverage test matching the scalar top-left rule.
+ */
+inline bool InsideHalfEdge(const float w, const bool top_left) {
+	if (w > 0.0f) {
+		return true;
+	}
+	if (w < 0.0f) {
+		return false;
+	}
+	return top_left;
+}
+
+/**
+ * Write one covered pixel (flat or textured) with depth + dirty tracking.
+ *
+ * Shared by scalar remainder and non-SIMD paths so conventions stay identical.
+ */
+inline void ShadeAndStoreTriPixel(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int x,
+	const int y,
+	const std::size_t stride,
+	const float z_win,
+	std::uint32_t packed,
+	const bool textured,
+	const ScreenTri& tri,
+	const float b0,
+	const float b1,
+	const float b2,
+	const float uw0,
+	const float uw1,
+	const float uw2,
+	const float vw0,
+	const float vw1,
+	const float vw2,
+	bool& touched,
+	int& dirty_x0,
+	int& dirty_y0,
+	int& dirty_x1,
+	int& dirty_y1) {
+	if (textured) {
+		const float iw = b0 * tri.iw0 + b1 * tri.iw1 + b2 * tri.iw2;
+		if (std::fabs(iw) < 1e-20f) {
+			return;
+		}
+		const float uw = b0 * uw0 + b1 * uw1 + b2 * uw2;
+		const float vw = b0 * vw0 + b1 * vw1 + b2 * vw2;
+		packed = SampleAtlasNearest(tri.atlas_rgba, tri.atlas_w, tri.atlas_h, uw / iw, vw / iw);
+	}
+
+	const std::uint32_t sa = packed >> 24U;
+	if (sa == 0U) {
+		return; // fully transparent texel / color: skip (no depth write)
+	}
+	const bool opaque = sa == 255U;
+	const bool write_depth = opaque; // translucent: test only; no depth write
+
+	if (depth != nullptr) {
+		if (write_depth) {
+			if (!depth->TestAndWrite(x, y, z_win)) {
+				return;
+			}
+		} else {
+			// Translucent: depth-test only (discard if behind); do not write depth.
+			if (z_win > depth->At(x, y)) {
+				return;
+			}
+		}
+	}
+
+	std::uint32_t* ptr = dst + (static_cast<std::size_t>(y) * stride) + static_cast<std::size_t>(x);
+	if (opaque) {
+		*ptr = packed;
+	} else {
+		StorePixel(ptr, packed);
+	}
+
+	touched = true;
+	dirty_x0 = std::min(dirty_x0, x);
+	dirty_y0 = std::min(dirty_y0, y);
+	dirty_x1 = std::max(dirty_x1, x);
+	dirty_y1 = std::max(dirty_y1, y);
+}
+
+#if defined(__AVX2__)
+/**
+ * AVX2: 8-wide opaque flat fill (coverage + depth test/write + color store).
+ *
+ * Returns movemask of pixels actually written (for dirty bounds).
+ */
+inline int FillOpaqueFlatBlock8(
+	std::uint32_t* row_dst,
+	float* row_depth,
+	const __m256 w0,
+	const __m256 w1,
+	const __m256 w2,
+	const __m256 z_win,
+	const __m256i color_i,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth) {
+	const __m256 zero = _mm256_setzero_ps();
+	// Top-left: E >= 0; else E > 0.
+	__m256 c0 = tl0 ? _mm256_cmp_ps(w0, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w0, zero, _CMP_GT_OQ);
+	__m256 c1 = tl1 ? _mm256_cmp_ps(w1, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w1, zero, _CMP_GT_OQ);
+	__m256 c2 = tl2 ? _mm256_cmp_ps(w2, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w2, zero, _CMP_GT_OQ);
+	__m256 cov = _mm256_and_ps(_mm256_and_ps(c0, c1), c2);
+	int cov_bits = _mm256_movemask_ps(cov);
+	if (cov_bits == 0) {
+		return 0;
+	}
+
+	__m256i store_mask = _mm256_castps_si256(cov);
+	if (has_depth && row_depth != nullptr) {
+		const __m256 d = _mm256_loadu_ps(row_depth);
+		const __m256 pass = _mm256_cmp_ps(z_win, d, _CMP_LE_OQ);
+		const __m256 write = _mm256_and_ps(cov, pass);
+		store_mask = _mm256_castps_si256(write);
+		const int write_bits = _mm256_movemask_ps(write);
+		if (write_bits == 0) {
+			return 0;
+		}
+		_mm256_maskstore_ps(row_depth, store_mask, z_win);
+	}
+	_mm256_maskstore_epi32(reinterpret_cast<int*>(row_dst), store_mask, color_i);
+	return _mm256_movemask_ps(_mm256_castsi256_ps(store_mask));
+}
+#elif defined(__SSE4_2__)
+/**
+ * SSE4.2: 4-wide opaque flat fill (coverage + depth + color).
+ */
+inline int FillOpaqueFlatBlock4(
+	std::uint32_t* row_dst,
+	float* row_depth,
+	const __m128 w0,
+	const __m128 w1,
+	const __m128 w2,
+	const __m128 z_win,
+	const __m128i color_i,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth) {
+	const __m128 zero = _mm_setzero_ps();
+	__m128 c0 = tl0 ? _mm_cmpge_ps(w0, zero) : _mm_cmpgt_ps(w0, zero);
+	__m128 c1 = tl1 ? _mm_cmpge_ps(w1, zero) : _mm_cmpgt_ps(w1, zero);
+	__m128 c2 = tl2 ? _mm_cmpge_ps(w2, zero) : _mm_cmpgt_ps(w2, zero);
+	__m128 cov = _mm_and_ps(_mm_and_ps(c0, c1), c2);
+	int cov_bits = _mm_movemask_ps(cov);
+	if (cov_bits == 0) {
+		return 0;
+	}
+
+	__m128 write = cov;
+	if (has_depth && row_depth != nullptr) {
+		const __m128 d = _mm_loadu_ps(row_depth);
+		const __m128 pass = _mm_cmple_ps(z_win, d);
+		write = _mm_and_ps(cov, pass);
+		const int write_bits = _mm_movemask_ps(write);
+		if (write_bits == 0) {
+			return 0;
+		}
+		// Manual masked depth store (no SSE maskstore).
+		alignas(16) float z_tmp[4];
+		alignas(16) float d_tmp[4];
+		_mm_store_ps(z_tmp, z_win);
+		_mm_store_ps(d_tmp, d);
+		for (int i = 0; i < 4; ++i) {
+			if ((write_bits & (1 << i)) != 0) {
+				d_tmp[i] = z_tmp[i];
+			}
+		}
+		_mm_storeu_ps(row_depth, _mm_load_ps(d_tmp));
+	}
+	const int write_bits = _mm_movemask_ps(write);
+	alignas(16) std::uint32_t c_tmp[4];
+	_mm_store_si128(reinterpret_cast<__m128i*>(c_tmp), color_i);
+	for (int i = 0; i < 4; ++i) {
+		if ((write_bits & (1 << i)) != 0) {
+			row_dst[i] = c_tmp[i];
+		}
+	}
+	return write_bits;
+}
+#endif
+
+/**
+ * Expand dirty AABB from a block write bitmask starting at pixel x.
+ */
+inline void ExpandDirtyFromMask(
+	const int x0,
+	const int y,
+	const int mask,
+	const int width_bits,
+	bool& touched,
+	int& dirty_x0,
+	int& dirty_y0,
+	int& dirty_x1,
+	int& dirty_y1) {
+	if (mask == 0) {
+		return;
+	}
+	touched = true;
+	dirty_y0 = std::min(dirty_y0, y);
+	dirty_y1 = std::max(dirty_y1, y);
+	for (int i = 0; i < width_bits; ++i) {
+		if ((mask & (1 << i)) != 0) {
+			const int x = x0 + i;
+			dirty_x0 = std::min(dirty_x0, x);
+			dirty_x1 = std::max(dirty_x1, x);
+		}
+	}
+}
+
+/**
  * Raster one screen-space triangle into a tile AABB using half-space coverage.
  *
  * Expects CCW winding in pixel space (caller reorders). Top-left fill rule.
  * Depth: interpolate z/w (and 1/w) in screen space; window z = ndc*0.5+0.5.
  * Opaque (a=255): depth test+write. Translucent: src-over, no depth write.
  * Textured: perspective-correct UV (u/w,v/w,1/w), nearest clamp sample; a==0 skips.
+ *
+ * Hot path: incremental edge/attribute setup, trivial tile reject vs half-planes,
+ * then AVX2 8-wide (or SSE4.2 4-wide) opaque flat blocks with scalar remainder.
  */
 inline void RasterScreenTriTile(
 	std::uint32_t* dst,
@@ -285,24 +605,45 @@ inline void RasterScreenTriTile(
 		return;
 	}
 
-	const bool tl12 = IsTopLeftEdge(tri.x1, tri.y1, tri.x2, tri.y2);
-	const bool tl20 = IsTopLeftEdge(tri.x2, tri.y2, tri.x0, tri.y0);
-	const bool tl01 = IsTopLeftEdge(tri.x0, tri.y0, tri.x1, tri.y1);
+	// Edge 0 = v1→v2 (bary w0), edge 1 = v2→v0, edge 2 = v0→v1.
+	const HalfEdgeCoef e0 = MakeHalfEdge(tri.x1, tri.y1, tri.x2, tri.y2);
+	const HalfEdgeCoef e1 = MakeHalfEdge(tri.x2, tri.y2, tri.x0, tri.y0);
+	const HalfEdgeCoef e2 = MakeHalfEdge(tri.x0, tri.y0, tri.x1, tri.y1);
+
+	const float px_lo = static_cast<float>(ix0) + 0.5f;
+	const float px_hi = static_cast<float>(ix1 - 1) + 0.5f;
+	const float py_lo = static_cast<float>(iy0) + 0.5f;
+	const float py_hi = static_cast<float>(iy1 - 1) + 0.5f;
+	// Trivial reject: tile AABB vs half-plane signs (no Hi-Z).
+	if (HalfEdgeBoxTrivialOut(e0, px_lo, px_hi, py_lo, py_hi) ||
+		HalfEdgeBoxTrivialOut(e1, px_lo, px_hi, py_lo, py_hi) ||
+		HalfEdgeBoxTrivialOut(e2, px_lo, px_hi, py_lo, py_hi)) {
+		return;
+	}
 
 	const float inv_area = 1.0f / area2;
 	const bool textured = tri.atlas_rgba != nullptr && tri.atlas_w > 0 && tri.atlas_h > 0;
 	const std::uint32_t flat_packed = tri.color;
+	const std::uint32_t flat_a = flat_packed >> 24U;
+	const bool opaque_flat = !textured && flat_a == 255U;
+	const bool has_depth = depth != nullptr && depth->Allocated();
+	float* depth_base = has_depth ? depth->Data() : nullptr;
 	const std::size_t stride = static_cast<std::size_t>(width);
 
-	auto inside = [&](const float w, const bool top_left) -> bool {
-		if (w > 0.0f) {
-			return true;
-		}
-		if (w < 0.0f) {
-			return false;
-		}
-		return top_left;
-	};
+	// Hoist perspective UV numerators (u/w, v/w) for textured path.
+	const float uw0 = tri.u0 * tri.iw0;
+	const float uw1 = tri.u1 * tri.iw1;
+	const float uw2 = tri.u2 * tri.iw2;
+	const float vw0 = tri.v0 * tri.iw0;
+	const float vw1 = tri.v1 * tri.iw1;
+	const float vw2 = tri.v2 * tri.iw2;
+
+	// Screen-linear z/w → window depth: z_win = 0.5 * zw + 0.5.
+	// Incremental in x: dz_win = 0.5 * inv_area * (A0*zw0 + A1*zw1 + A2*zw2).
+	const float dzw_dx = inv_area * (e0.a * tri.zw0 + e1.a * tri.zw1 + e2.a * tri.zw2);
+	const float dzw_dy = inv_area * (e0.b * tri.zw0 + e1.b * tri.zw1 + e2.b * tri.zw2);
+	const float dz_win_dx = 0.5f * dzw_dx;
+	const float dz_win_dy = 0.5f * dzw_dy;
 
 	bool touched = false;
 	int dirty_x0 = ix1;
@@ -310,70 +651,315 @@ inline void RasterScreenTriTile(
 	int dirty_x1 = ix0;
 	int dirty_y1 = iy0;
 
-	for (int y = iy0; y < iy1; ++y) {
-		const float py = static_cast<float>(y) + 0.5f;
-		for (int x = ix0; x < ix1; ++x) {
-			const float px = static_cast<float>(x) + 0.5f;
-			const float w0 = EdgeFn(tri.x1, tri.y1, tri.x2, tri.y2, px, py);
-			const float w1 = EdgeFn(tri.x2, tri.y2, tri.x0, tri.y0, px, py);
-			const float w2 = EdgeFn(tri.x0, tri.y0, tri.x1, tri.y1, px, py);
-			if (!inside(w0, tl12) || !inside(w1, tl20) || !inside(w2, tl01)) {
-				continue;
-			}
+	// Row-start edge + depth at (ix0+0.5, iy0+0.5); step by B each row, A each column.
+	float w0_row = EvalHalfEdge(e0, px_lo, py_lo);
+	float w1_row = EvalHalfEdge(e1, px_lo, py_lo);
+	float w2_row = EvalHalfEdge(e2, px_lo, py_lo);
+	const float zw_row0 =
+		(w0_row * tri.zw0 + w1_row * tri.zw1 + w2_row * tri.zw2) * inv_area;
+	float z_win_row = NdcToWindowDepth(zw_row0);
 
-			const float b0 = w0 * inv_area;
-			const float b1 = w1 * inv_area;
-			const float b2 = w2 * inv_area;
-			// Screen-linear z/w (perspective-correct for depth with matching 1/w).
-			const float zw = b0 * tri.zw0 + b1 * tri.zw1 + b2 * tri.zw2;
-			const float z_win = NdcToWindowDepth(zw);
+	// Convex half-spaces: if the AABB is inside all three edges, skip coverage tests.
+	const bool box_fully_covered =
+		HalfEdgeBoxTrivialIn(e0, px_lo, px_hi, py_lo, py_hi) &&
+		HalfEdgeBoxTrivialIn(e1, px_lo, px_hi, py_lo, py_hi) &&
+		HalfEdgeBoxTrivialIn(e2, px_lo, px_hi, py_lo, py_hi);
 
-			std::uint32_t packed = flat_packed;
-			if (textured) {
-				// Perspective-correct UV: interpolate u/w, v/w, 1/w then divide.
-				const float iw = b0 * tri.iw0 + b1 * tri.iw1 + b2 * tri.iw2;
-				if (std::fabs(iw) < 1e-20f) {
-					continue;
-				}
-				const float uw =
-					b0 * (tri.u0 * tri.iw0) + b1 * (tri.u1 * tri.iw1) + b2 * (tri.u2 * tri.iw2);
-				const float vw =
-					b0 * (tri.v0 * tri.iw0) + b1 * (tri.v1 * tri.iw1) + b2 * (tri.v2 * tri.iw2);
-				packed = SampleAtlasNearest(tri.atlas_rgba, tri.atlas_w, tri.atlas_h, uw / iw, vw / iw);
-			}
+	if (opaque_flat) {
+#if defined(__AVX2__)
+		const __m256i color_i = _mm256_set1_epi32(static_cast<int>(flat_packed));
+		const __m256 a0_v = _mm256_set1_ps(e0.a);
+		const __m256 a1_v = _mm256_set1_ps(e1.a);
+		const __m256 a2_v = _mm256_set1_ps(e2.a);
+		const __m256 dz_dx_v = _mm256_set1_ps(dz_win_dx);
+		const __m256 lane = _mm256_setr_ps(0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f);
+		const __m256 a0_lane = _mm256_mul_ps(a0_v, lane);
+		const __m256 a1_lane = _mm256_mul_ps(a1_v, lane);
+		const __m256 a2_lane = _mm256_mul_ps(a2_v, lane);
+		const __m256 dz_lane = _mm256_mul_ps(dz_dx_v, lane);
+		constexpr int kBlock = 8;
+#elif defined(__SSE4_2__)
+		const __m128i color_i = _mm_set1_epi32(static_cast<int>(flat_packed));
+		const __m128 a0_v = _mm_set1_ps(e0.a);
+		const __m128 a1_v = _mm_set1_ps(e1.a);
+		const __m128 a2_v = _mm_set1_ps(e2.a);
+		const __m128 dz_dx_v = _mm_set1_ps(dz_win_dx);
+		const __m128 lane = _mm_setr_ps(0.0f, 1.0f, 2.0f, 3.0f);
+		const __m128 a0_lane = _mm_mul_ps(a0_v, lane);
+		const __m128 a1_lane = _mm_mul_ps(a1_v, lane);
+		const __m128 a2_lane = _mm_mul_ps(a2_v, lane);
+		const __m128 dz_lane = _mm_mul_ps(dz_dx_v, lane);
+		constexpr int kBlock = 4;
+#endif
+		for (int y = iy0; y < iy1; ++y) {
+			float w0 = w0_row;
+			float w1 = w1_row;
+			float w2 = w2_row;
+			float z_win = z_win_row;
+			std::uint32_t* row_dst = dst + static_cast<std::size_t>(y) * stride;
+			float* row_depth = has_depth ? (depth_base + static_cast<std::size_t>(y) * stride) : nullptr;
 
-			const std::uint32_t sa = packed >> 24U;
-			if (sa == 0U) {
-				continue; // fully transparent texel / color: skip (no depth write)
-			}
-			const bool opaque = sa == 255U;
-			const bool write_depth = opaque; // translucent: test only; no depth write
-
-			if (depth != nullptr) {
-				if (write_depth) {
-					if (!depth->TestAndWrite(x, y, z_win)) {
-						continue;
+			int x = ix0;
+#if defined(__AVX2__) || defined(__SSE4_2__)
+			if (box_fully_covered) {
+				// Interior tile: depth + color only (no edge compares).
+				for (; x + kBlock <= ix1; x += kBlock) {
+#if defined(__AVX2__)
+					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
+					int written = 0xFF;
+					if (has_depth) {
+						const __m256 d = _mm256_loadu_ps(row_depth + x);
+						const __m256 pass = _mm256_cmp_ps(zv, d, _CMP_LE_OQ);
+						const __m256i store_mask = _mm256_castps_si256(pass);
+						written = _mm256_movemask_ps(pass);
+						if (written != 0) {
+							_mm256_maskstore_ps(row_depth + x, store_mask, zv);
+							_mm256_maskstore_epi32(reinterpret_cast<int*>(row_dst + x), store_mask, color_i);
+						}
+					} else {
+						_mm256_storeu_si256(reinterpret_cast<__m256i*>(row_dst + x), color_i);
 					}
-				} else {
-					// Translucent: depth-test only (discard if behind); do not write depth.
-					if (z_win > depth->At(x, y)) {
-						continue;
+#elif defined(__SSE4_2__)
+					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
+					int written = 0xF;
+					if (has_depth) {
+						const __m128 d = _mm_loadu_ps(row_depth + x);
+						const __m128 pass = _mm_cmple_ps(zv, d);
+						written = _mm_movemask_ps(pass);
+						if (written != 0) {
+							alignas(16) float z_tmp[4];
+							alignas(16) float d_tmp[4];
+							_mm_store_ps(z_tmp, zv);
+							_mm_store_ps(d_tmp, d);
+							for (int i = 0; i < 4; ++i) {
+								if ((written & (1 << i)) != 0) {
+									d_tmp[i] = z_tmp[i];
+									row_dst[x + i] = flat_packed;
+								}
+							}
+							_mm_storeu_ps(row_depth + x, _mm_load_ps(d_tmp));
+						}
+					} else {
+						_mm_storeu_si128(reinterpret_cast<__m128i*>(row_dst + x), color_i);
 					}
+#endif
+					ExpandDirtyFromMask(x, y, written, kBlock, touched, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+					z_win += dz_win_dx * static_cast<float>(kBlock);
 				}
-			}
-
-			std::uint32_t* ptr = dst + (static_cast<std::size_t>(y) * stride) + static_cast<std::size_t>(x);
-			if (opaque) {
-				*ptr = packed;
 			} else {
-				StorePixel(ptr, packed);
+				for (; x + kBlock <= ix1; x += kBlock) {
+#if defined(__AVX2__)
+					const __m256 w0v = _mm256_add_ps(_mm256_set1_ps(w0), a0_lane);
+					const __m256 w1v = _mm256_add_ps(_mm256_set1_ps(w1), a1_lane);
+					const __m256 w2v = _mm256_add_ps(_mm256_set1_ps(w2), a2_lane);
+					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
+					const int written = FillOpaqueFlatBlock8(
+						row_dst + x,
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						color_i,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth);
+#elif defined(__SSE4_2__)
+					const __m128 w0v = _mm_add_ps(_mm_set1_ps(w0), a0_lane);
+					const __m128 w1v = _mm_add_ps(_mm_set1_ps(w1), a1_lane);
+					const __m128 w2v = _mm_add_ps(_mm_set1_ps(w2), a2_lane);
+					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
+					const int written = FillOpaqueFlatBlock4(
+						row_dst + x,
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						color_i,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth);
+#endif
+					ExpandDirtyFromMask(x, y, written, kBlock, touched, dirty_x0, dirty_y0, dirty_x1, dirty_y1);
+					w0 += e0.a * static_cast<float>(kBlock);
+					w1 += e1.a * static_cast<float>(kBlock);
+					w2 += e2.a * static_cast<float>(kBlock);
+					z_win += dz_win_dx * static_cast<float>(kBlock);
+				}
+			}
+#endif
+			for (; x < ix1; ++x) {
+				const bool cover = box_fully_covered ||
+					(InsideHalfEdge(w0, e0.top_left) && InsideHalfEdge(w1, e1.top_left) &&
+						InsideHalfEdge(w2, e2.top_left));
+				if (cover) {
+					if (has_depth) {
+						float& slot = row_depth[x];
+						if (z_win <= slot) {
+							slot = z_win;
+							row_dst[x] = flat_packed;
+							touched = true;
+							dirty_x0 = std::min(dirty_x0, x);
+							dirty_y0 = std::min(dirty_y0, y);
+							dirty_x1 = std::max(dirty_x1, x);
+							dirty_y1 = std::max(dirty_y1, y);
+						}
+					} else {
+						row_dst[x] = flat_packed;
+						touched = true;
+						dirty_x0 = std::min(dirty_x0, x);
+						dirty_y0 = std::min(dirty_y0, y);
+						dirty_x1 = std::max(dirty_x1, x);
+						dirty_y1 = std::max(dirty_y1, y);
+					}
+				}
+				if (!box_fully_covered) {
+					w0 += e0.a;
+					w1 += e1.a;
+					w2 += e2.a;
+				}
+				z_win += dz_win_dx;
 			}
 
-			touched = true;
-			dirty_x0 = std::min(dirty_x0, x);
-			dirty_y0 = std::min(dirty_y0, y);
-			dirty_x1 = std::max(dirty_x1, x);
-			dirty_y1 = std::max(dirty_y1, y);
+			w0_row += e0.b;
+			w1_row += e1.b;
+			w2_row += e2.b;
+			z_win_row += dz_win_dy;
+		}
+	} else if (textured) {
+		// Textured: incremental barycentrics + u/w,v/w,1/w; opaque texels use fast depth write.
+		const float db0_dx = e0.a * inv_area;
+		const float db1_dx = e1.a * inv_area;
+		const float db2_dx = e2.a * inv_area;
+		const float db0_dy = e0.b * inv_area;
+		const float db1_dy = e1.b * inv_area;
+		const float db2_dy = e2.b * inv_area;
+		float b0_row = w0_row * inv_area;
+		float b1_row = w1_row * inv_area;
+		float b2_row = w2_row * inv_area;
+		const float diw_dx = db0_dx * tri.iw0 + db1_dx * tri.iw1 + db2_dx * tri.iw2;
+		const float diw_dy = db0_dy * tri.iw0 + db1_dy * tri.iw1 + db2_dy * tri.iw2;
+		const float duw_dx = db0_dx * uw0 + db1_dx * uw1 + db2_dx * uw2;
+		const float duw_dy = db0_dy * uw0 + db1_dy * uw1 + db2_dy * uw2;
+		const float dvw_dx = db0_dx * vw0 + db1_dx * vw1 + db2_dx * vw2;
+		const float dvw_dy = db0_dy * vw0 + db1_dy * vw1 + db2_dy * vw2;
+		float iw_row = b0_row * tri.iw0 + b1_row * tri.iw1 + b2_row * tri.iw2;
+		float uw_row = b0_row * uw0 + b1_row * uw1 + b2_row * uw2;
+		float vw_row = b0_row * vw0 + b1_row * vw1 + b2_row * vw2;
+
+		for (int y = iy0; y < iy1; ++y) {
+			float w0 = w0_row;
+			float w1 = w1_row;
+			float w2 = w2_row;
+			float z_win = z_win_row;
+			float iw = iw_row;
+			float uw = uw_row;
+			float vw = vw_row;
+			std::uint32_t* row_dst = dst + static_cast<std::size_t>(y) * stride;
+			float* row_depth = has_depth ? (depth_base + static_cast<std::size_t>(y) * stride) : nullptr;
+
+			for (int x = ix0; x < ix1; ++x) {
+				const bool cover = box_fully_covered ||
+					(InsideHalfEdge(w0, e0.top_left) && InsideHalfEdge(w1, e1.top_left) &&
+						InsideHalfEdge(w2, e2.top_left));
+				if (cover && std::fabs(iw) >= 1e-20f) {
+					const std::uint32_t packed =
+						SampleAtlasNearest(tri.atlas_rgba, tri.atlas_w, tri.atlas_h, uw / iw, vw / iw);
+					const std::uint32_t sa = packed >> 24U;
+					if (sa != 0U) {
+						const bool opaque = sa == 255U;
+						bool pass = true;
+						if (has_depth) {
+							if (opaque) {
+								float& slot = row_depth[x];
+								if (z_win <= slot) {
+									slot = z_win;
+								} else {
+									pass = false;
+								}
+							} else if (z_win > row_depth[x]) {
+								pass = false;
+							}
+						}
+						if (pass) {
+							if (opaque) {
+								row_dst[x] = packed;
+							} else {
+								StorePixel(row_dst + x, packed);
+							}
+							touched = true;
+							dirty_x0 = std::min(dirty_x0, x);
+							dirty_y0 = std::min(dirty_y0, y);
+							dirty_x1 = std::max(dirty_x1, x);
+							dirty_y1 = std::max(dirty_y1, y);
+						}
+					}
+				}
+				if (!box_fully_covered) {
+					w0 += e0.a;
+					w1 += e1.a;
+					w2 += e2.a;
+				}
+				z_win += dz_win_dx;
+				iw += diw_dx;
+				uw += duw_dx;
+				vw += dvw_dx;
+			}
+			w0_row += e0.b;
+			w1_row += e1.b;
+			w2_row += e2.b;
+			z_win_row += dz_win_dy;
+			iw_row += diw_dy;
+			uw_row += duw_dy;
+			vw_row += dvw_dy;
+		}
+	} else {
+		// Translucent flat: incremental edges + src-over (no depth write).
+		for (int y = iy0; y < iy1; ++y) {
+			float w0 = w0_row;
+			float w1 = w1_row;
+			float w2 = w2_row;
+			float z_win = z_win_row;
+			for (int x = ix0; x < ix1; ++x) {
+				if (InsideHalfEdge(w0, e0.top_left) && InsideHalfEdge(w1, e1.top_left) &&
+					InsideHalfEdge(w2, e2.top_left)) {
+					ShadeAndStoreTriPixel(
+						dst,
+						depth,
+						x,
+						y,
+						stride,
+						z_win,
+						flat_packed,
+						false,
+						tri,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						0.0f,
+						touched,
+						dirty_x0,
+						dirty_y0,
+						dirty_x1,
+						dirty_y1);
+				}
+				w0 += e0.a;
+				w1 += e1.a;
+				w2 += e2.a;
+				z_win += dz_win_dx;
+			}
+			w0_row += e0.b;
+			w1_row += e1.b;
+			w2_row += e2.b;
+			z_win_row += dz_win_dy;
 		}
 	}
 
