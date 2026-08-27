@@ -1842,6 +1842,10 @@ inline void RasterScreenTrisTiled(
 		if (tx0 > tx1 || ty0 > ty1) {
 			continue;
 		}
+		if (tx0 == tx1 && ty0 == ty1) {
+			bins[static_cast<std::size_t>(ty0 * tiles_x + tx0)].push_back(ti);
+			continue;
+		}
 		for (int ty = ty0; ty <= ty1; ++ty) {
 			const int row = ty * tiles_x;
 			for (int tx = tx0; tx <= tx1; ++tx) {
