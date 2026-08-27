@@ -363,6 +363,53 @@ inline bool InsideHalfEdge(const float w, const bool top_left) {
 }
 
 /**
+ * Minimum window depth over a screen triangle (linear z/w → extrema at vertices).
+ */
+inline float TriMinWindowDepthVertices(ScreenTri tri) {
+	float area2 = ScreenSignedArea2(tri.x0, tri.y0, tri.x1, tri.y1, tri.x2, tri.y2);
+	if (area2 < 0.0f) {
+		std::swap(tri.zw1, tri.zw2);
+	}
+	const float z0 = NdcToWindowDepth(tri.zw0);
+	const float z1 = NdcToWindowDepth(tri.zw1);
+	const float z2 = NdcToWindowDepth(tri.zw2);
+	return std::min(z0, std::min(z1, z2));
+}
+
+/**
+ * Farthest stored window depth (max sample) in a tile region — conservative Hi-Z occluder.
+ */
+inline float ScanTileMaxDepth(
+	const float* depth_base,
+	const int width,
+	const int x0,
+	const int y0,
+	const int x1,
+	const int y1) {
+	float max_d = 0.0f;
+	for (int y = y0; y < y1; ++y) {
+		const float* row = depth_base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+		for (int x = x0; x < x1; ++x) {
+			max_d = std::max(max_d, row[x]);
+		}
+	}
+	return max_d;
+}
+
+/**
+ * True when the triangle's nearest window depth is behind every stored sample in the tile.
+ *
+ * Uses the triangle-wide vertex minimum (linear z/w → exact min on the whole tri).
+ * tile_max_depth must be the max depth currently in the tile (1.0 = cleared / no occluder).
+ */
+inline bool TriTileDepthReject(const ScreenTri& tri, const float tile_max_depth) {
+	if (tile_max_depth >= 1.0f) {
+		return false;
+	}
+	return TriMinWindowDepthVertices(tri) > tile_max_depth;
+}
+
+/**
  * Write one covered pixel (flat or textured) with depth + dirty tracking.
  *
  * Shared by scalar remainder and non-SIMD paths so conventions stay identical.
@@ -625,8 +672,10 @@ inline void ExpandDirtyFromMask(
  * Hot path: incremental edge/attribute setup, trivial tile reject vs half-planes,
  * then opaque flat blocks: AVX-512VL 8-wide k-masks when available, else AVX2 /
  * SSE4.2, with scalar remainder. Textured stays scalar (gather SIMD lost here).
+ *
+ * Returns true when at least one pixel was written.
  */
-inline void RasterScreenTriTile(
+inline bool RasterScreenTriTile(
 	std::uint32_t* dst,
 	DepthBuffer* depth,
 	const int width,
@@ -650,7 +699,7 @@ inline void RasterScreenTriTile(
 		area2 = -area2;
 	}
 	if (area2 < 1e-8f) {
-		return;
+		return false;
 	}
 
 	const float min_x_f = std::min({tri.x0, tri.x1, tri.x2});
@@ -667,7 +716,7 @@ inline void RasterScreenTriTile(
 	ix1 = std::min(ix1, width);
 	iy1 = std::min(iy1, height);
 	if (ix0 >= ix1 || iy0 >= iy1) {
-		return;
+		return false;
 	}
 
 	// Edge 0 = v1→v2 (bary w0), edge 1 = v2→v0, edge 2 = v0→v1.
@@ -679,11 +728,11 @@ inline void RasterScreenTriTile(
 	const float px_hi = static_cast<float>(ix1 - 1) + 0.5f;
 	const float py_lo = static_cast<float>(iy0) + 0.5f;
 	const float py_hi = static_cast<float>(iy1 - 1) + 0.5f;
-	// Trivial reject: tile AABB vs half-plane signs (no Hi-Z).
+	// Trivial reject: tile AABB vs half-plane signs.
 	if (HalfEdgeBoxTrivialOut(e0, px_lo, px_hi, py_lo, py_hi) ||
 		HalfEdgeBoxTrivialOut(e1, px_lo, px_hi, py_lo, py_hi) ||
 		HalfEdgeBoxTrivialOut(e2, px_lo, px_hi, py_lo, py_hi)) {
-		return;
+		return false;
 	}
 
 	const float inv_area = 1.0f / area2;
@@ -1047,6 +1096,7 @@ inline void RasterScreenTriTile(
 		bounds.Expand(dirty_x0, dirty_y0);
 		bounds.Expand(dirty_x1, dirty_y1);
 	}
+	return touched;
 }
 
 /**
@@ -1180,6 +1230,8 @@ struct MeshDrawScratch {
 	std::vector<ScreenTri> screen{};
 	/** 64×64 tile → triangle index lists (capacity retained across frames). */
 	std::vector<std::vector<std::uint32_t>> bins{};
+	/** Per-tile max stored window depth for Hi-Z reject (size = tile_count, reset each draw). */
+	std::vector<float> tile_max_depth{};
 };
 
 /**
@@ -1454,6 +1506,9 @@ inline void EmitScreenTri(
  *
  * Reuses thread-local bin vectors across calls (clear, keep capacity). AABB uses nested
  * min/max (no initializer_list). No per-pixel work in the bin pass.
+ *
+ * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
+ * behind that occluder skip the pixel loop (updated after each raster in tile order).
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -1479,6 +1534,17 @@ inline void RasterScreenTrisTiled(
 			bin.clear();
 		}
 	}
+
+	auto& tile_max_depth = scratch.tile_max_depth;
+	if (static_cast<int>(tile_max_depth.size()) != tile_count) {
+		tile_max_depth.assign(static_cast<std::size_t>(tile_count), 1.0f);
+	} else {
+		std::fill(tile_max_depth.begin(), tile_max_depth.end(), 1.0f);
+	}
+
+	const bool depth_on = depth != nullptr && depth->Allocated();
+	const float* depth_base = depth_on ? depth->Data() : nullptr;
+	constexpr float kHiZFarDepth = 1.0f - 1e-6f;
 
 	PixelBounds global_bounds{};
 
@@ -1527,8 +1593,18 @@ inline void RasterScreenTrisTiled(
 		const int y0 = ty * kTile;
 		const int x1 = std::min(x0 + kTile, width);
 		const int y1 = std::min(y0 + kTile, height);
+		float& tile_max = tile_max_depth[static_cast<std::size_t>(tile)];
+		bool tile_hiz_scanned = false;
 		for (const std::uint32_t idx : list) {
-			RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], local);
+			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
+				continue;
+			}
+			if (RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], local)) {
+				if (depth_on && (!tile_hiz_scanned || tile_max < kHiZFarDepth)) {
+					tile_max = ScanTileMaxDepth(depth_base, width, x0, y0, x1, y1);
+					tile_hiz_scanned = true;
+				}
+			}
 		}
 	}
 	MergeThreadBounds(global_bounds, thread_bounds);
@@ -1544,8 +1620,18 @@ inline void RasterScreenTrisTiled(
 		const int y0 = ty * kTile;
 		const int x1 = std::min(x0 + kTile, width);
 		const int y1 = std::min(y0 + kTile, height);
+		float& tile_max = tile_max_depth[static_cast<std::size_t>(tile)];
+		bool tile_hiz_scanned = false;
 		for (const std::uint32_t idx : list) {
-			RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], global_bounds);
+			if (tile_hiz_scanned && tile_max < kHiZFarDepth && TriTileDepthReject(tris[idx], tile_max)) {
+				continue;
+			}
+			if (RasterScreenTriTile(dst, depth, width, height, x0, y0, x1, y1, tris[idx], global_bounds)) {
+				if (depth_on && (!tile_hiz_scanned || tile_max < kHiZFarDepth)) {
+					tile_max = ScanTileMaxDepth(depth_base, width, x0, y0, x1, y1);
+					tile_hiz_scanned = true;
+				}
+			}
 		}
 	}
 #endif
