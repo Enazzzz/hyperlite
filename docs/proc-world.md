@@ -60,7 +60,7 @@ HYPERLITE_HEADLESS=1 .venv/bin/python python/examples/proc_world.py --preset pla
 | Subsystem | How |
 |-----------|-----|
 | **Fill / textured raster** | Each visible terrain chunk is a **unique** indexed heightgrid (`load_mesh` + `draw_mesh_textured`). Limit preset submits **~280k–580k tris/frame** depending on view. |
-| **Transform / clip / bin** | Every tree, rock, and cube-city block is a separate `draw_mesh` with its own model matrix (**~3.3k–4.1k props/frame** in limit). |
+| **Transform / clip / bin** | Trees, rocks, and cube-city blocks share three prop meshes; limit submits **~3.3k–4.1k instances/frame** via **`draw_mesh_many`** (three batches: tree / rock / city). Terrain chunks stay per-chunk `draw_mesh_textured`. |
 | **Translucent path** | Sea-level water uses `draw_mesh` with `a<255` (depth test, no depth write). |
 | **2D HUD** | Rect bars only (fps, chunks, tris, props) — small but non-zero 2D work atop 3D. |
 | **Generation (startup)** | Python + NumPy builds **784** unique chunk meshes for limit (~11.5 s on the VM below). Bounded world — no streaming/`unload_mesh`. |
@@ -116,12 +116,24 @@ preset=limit frames=362 fps=45.2 ms=22.10 chunks_drawn=115 tris_submitted=415877
 
 Per-second samples during the run ranged **~18–85 fps** as the autopilot camera swung between dense city + forest views (~165 chunks, ~578k tris) and open horizon (~74 chunks, ~285k tris).
 
-**Bottleneck read:** at limit, cost is **both fill and transform/clip/bin**. Textured terrain supplies hundreds of thousands of unique triangles per frame (fill + perspective UV). Separately, **~3.6k `draw_mesh` prop calls/frame** keep the retained-mesh transform path hot even when triangle count dips. Spikes to ~580k tris/frame correlate with **~18 fps**; lighter views recover toward **~85 fps** with the same prop count — consistent with fill dominating at high coverage while prop instancing stays a steady transform tax.
+**Bottleneck read:** at limit, cost is **both fill and transform/clip/bin**. Textured terrain supplies hundreds of thousands of unique triangles per frame (fill + perspective UV). Prop draws use **`draw_mesh_many`** (see [mesh-instances.md](mesh-instances.md)) so transform/clip runs per instance but **tile bin + fill + Python dispatch** happen once per prop mesh type (~3 native calls/frame instead of ~3.6k). Spikes to ~580k tris/frame correlate with **~18 fps**; lighter views recover toward **~85 fps**.
 
 Compare with flat microbenches in [3d-mesh-bench.md](3d-mesh-bench.md) (~5–8 M tris/s on repeated topology). Here, **unique chunk topology + mixed textured fill + thousands of model matrices** is deliberately worse than a single repeated grid.
 
+### `limit` with mesh instancing (8 s headless, seed=42)
+
+Props use **`draw_mesh_many`** (three batches: tree / rock / city). Terrain stays per-chunk `draw_mesh_textured`.
+
+| | fps | ms | chunks | tris | props |
+|---|-----|-----|--------|------|-------|
+| Per-prop `draw_mesh` (main + Hi-Z) | 45.1 | 22.18 | 115 | 415824 | 3588 |
+| Batched props (`draw_mesh_many`) | 65.2 | 15.35 | 118 | 427635 | 3612 |
+
+Dense city views: **~18.5 fps → ~37 fps** at ~578k tris/frame. See [mesh-instances.md](mesh-instances.md).
+
 ## See also
 
+- [mesh-instances.md](mesh-instances.md) — batched `draw_mesh_many` API and proc_world before/after
 - [3d-meshes.md](3d-meshes.md) — mesh/atlas API
 - [3d-mesh-bench.md](3d-mesh-bench.md) — retained-mesh microbenches
 - [3d-plan.md](3d-plan.md) — layer roadmap

@@ -582,6 +582,10 @@ class ProcWorld:
 		self.cube_tris = 0
 		self.atlas_id = -1
 		self.ridge_segments = np.zeros(0, dtype=np.float32)
+		# Reused instance model buffers (filled per frame, batched native draw).
+		self._tree_models = np.zeros((cfg.tree_count, 16), dtype=np.float32)
+		self._rock_models = np.zeros((cfg.rock_count, 16), dtype=np.float32)
+		self._city_models = np.zeros((cfg.city_size * cfg.city_size, 16), dtype=np.float32)
 		self._generate(engine)
 
 	def _generate(self, engine: hyperlite.Engine) -> None:
@@ -749,6 +753,9 @@ class ProcWorld:
 			)
 			stats.tris_submitted += self.water_tris
 
+		tree_count = 0
+		rock_count = 0
+		city_count = 0
 		for prop in self.props:
 			px = float(prop.model[12])
 			pz = float(prop.model[14])
@@ -757,14 +764,23 @@ class ProcWorld:
 			if dx * dx + dz * dz > draw_dist_sq:
 				continue
 			if prop.kind == "tree":
-				engine.draw_mesh(prop.mesh_id, prop.model, 30, 110, 45, 255)
+				self._tree_models[tree_count] = prop.model
+				tree_count += 1
 			elif prop.kind == "rock":
-				engine.draw_mesh(prop.mesh_id, prop.model, 95, 92, 88, 255)
+				self._rock_models[rock_count] = prop.model
+				rock_count += 1
 			else:
-				# Cube city — warm window tones.
-				engine.draw_mesh(prop.mesh_id, prop.model, 180, 150, 90, 255)
+				self._city_models[city_count] = prop.model
+				city_count += 1
 			stats.props_drawn += 1
 			stats.tris_submitted += prop.tri_count
+
+		if tree_count > 0:
+			engine.draw_mesh_many(self.tree_mesh, self._tree_models[:tree_count], 30, 110, 45, 255)
+		if rock_count > 0:
+			engine.draw_mesh_many(self.rock_mesh, self._rock_models[:rock_count], 95, 92, 88, 255)
+		if city_count > 0:
+			engine.draw_mesh_many(self.cube_mesh, self._city_models[:city_count], 180, 150, 90, 255)
 
 		if self.ridge_segments.size > 0:
 			engine.lines_3d(self.ridge_segments, 160, 175, 195, 90, 1)

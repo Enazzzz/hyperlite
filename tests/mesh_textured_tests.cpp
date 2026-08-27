@@ -57,6 +57,16 @@ void FillIdentity(float* m) {
 }
 
 /**
+ * Column-major translation matrix (mesh-local → world).
+ */
+void FillTranslate(float* m, const float tx, const float ty, const float tz) {
+	FillIdentity(m);
+	m[12] = tx;
+	m[13] = ty;
+	m[14] = tz;
+}
+
+/**
  * Unit quad covering the NDC center with UVs spanning the full atlas (0..1).
  *
  * verts layout: x,y,z,u,v,_pad — BL→BR→TR→TL (OpenGL-front CCW).
@@ -222,6 +232,39 @@ int main() {
 			atlas);
 		ok = Expect(drawn == 2, "tick_mesh_textured: two tris") && ok;
 		ok = Expect(PixelEquals(ReadPixel(engine, 20, 44), 255, 0, 0), "tick_mesh_textured: screen BL red") && ok;
+	}
+
+	// --- draw_mesh_textured_many paints atlas for two instances ---
+	{
+		hyperlite::Engine engine(64, 64, hyperlite::BackendKind::kCpu, "mesh-tex-many", hyperlite::PresentMode::kHeadless);
+		engine.SetVsync(false);
+		engine.EnableDepth(true);
+		float vp[16];
+		FillIdentity(vp);
+		engine.SetViewProj(vp);
+
+		std::vector<std::uint8_t> atlas_px;
+		FillAtlas2x2(atlas_px);
+		const int atlas = engine.LoadAtlas(atlas_px.data(), atlas_px.size(), 2, 2);
+
+		std::vector<float> verts;
+		std::vector<std::uint32_t> indices;
+		FillUnitQuadVerts(verts);
+		FillUnitQuadIndices(indices);
+		const int mesh = engine.LoadMesh(verts.data(), verts.size(), indices.data(), indices.size());
+
+		float models[32];
+		FillIdentity(models);
+		FillTranslate(models + 16, 0.35f, 0.0f, 0.0f);
+
+		engine.BeginFrame();
+		engine.PushCommand(hyperlite::MakeDrawCommand(
+			hyperlite::CommandType::kClear, 0, 0, 0, 0, hyperlite::PackColor({0, 0, 0, 255})));
+		engine.DrawMeshTexturedMany(mesh, models, 2U, atlas);
+		engine.EndFrame();
+		engine.Present();
+
+		ok = Expect(PixelEquals(ReadPixel(engine, 32, 32), 255, 0, 0), "mesh_textured_many: center red atlas") && ok;
 	}
 
 	if (!ok) {

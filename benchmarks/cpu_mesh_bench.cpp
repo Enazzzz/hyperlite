@@ -146,13 +146,15 @@ void BuildOccluderMesh(
  *
  * Mesh: 70×70 quads × 2 tris. Drawn once per frame via TickMesh / TickMeshTextured
  * @ 1280×720 depth on. Pass argv[1]=="textured" to run the textured path only;
- * "flat" for flat only; "occluded" for flat with a fullscreen occluder draw first.
+ * "flat" for flat only; "occluded" for flat with a fullscreen occluder draw first;
+ * "instanced" for flat DrawMeshMany stress (128 instances/frame, single bin/fill).
  * Otherwise run flat then textured and print both.
  */
 int main(int argc, char** argv) {
 	const bool textured_only = (argc > 1 && std::string(argv[1]) == "textured");
 	const bool flat_only = (argc > 1 && std::string(argv[1]) == "flat");
 	const bool occluded = (argc > 1 && std::string(argv[1]) == "occluded");
+	const bool instanced = (argc > 1 && std::string(argv[1]) == "instanced");
 
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Mesh Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
@@ -272,6 +274,41 @@ int main(int argc, char** argv) {
 
 	if (occluded) {
 		print_result("TickMesh", run_flat());
+		return 0;
+	}
+
+	if (instanced) {
+		constexpr int kInstances = 128;
+		std::vector<float> models(static_cast<std::size_t>(kInstances) * 16U);
+		for (int i = 0; i < kInstances; ++i) {
+			float* m = models.data() + static_cast<std::size_t>(i) * 16U;
+			FillIdentity(m);
+			m[12] = 0.002f * static_cast<float>(i % 32);
+			m[14] = 0.002f * static_cast<float>((i / 32) % 32);
+		}
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		for (int frame = 0; frame < frame_iterations; ++frame) {
+			engine.BeginFrame();
+			engine.PushCommand(hyperlite::MakeDrawCommand(
+				hyperlite::CommandType::kClear, 0, 0, 0, 0, clear_packed));
+			engine.DrawMeshMany(draw_mesh, models.data(), static_cast<std::size_t>(kInstances), tri_packed);
+			engine.EndFrame();
+			engine.Present();
+		}
+		const auto t1 = std::chrono::high_resolution_clock::now();
+		const double ms = ElapsedMs(t0, t1);
+		const double tris = static_cast<double>(frame_iterations) * static_cast<double>(tris_per_draw) *
+			static_cast<double>(kInstances);
+		const double tris_per_second = tris / (ms / 1000.0);
+		std::cout << "frames=" << frame_iterations << '\n';
+		std::cout << "tris_per_frame=" << (tris_per_draw * static_cast<std::size_t>(kInstances)) << '\n';
+		std::cout << "draws_per_frame=1\n";
+		std::cout << "instances_per_draw=" << kInstances << '\n';
+		std::cout << "resolution=1280x720\n";
+		std::cout << "depth=on\n";
+		std::cout << "path=DrawMeshMany\n";
+		std::cout << "total_ms=" << ms << '\n';
+		std::cout << "tris_per_second=" << tris_per_second << '\n';
 		return 0;
 	}
 

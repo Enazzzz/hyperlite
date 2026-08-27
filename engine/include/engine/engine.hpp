@@ -312,6 +312,18 @@ public:
 	void DrawMesh(int mesh_id, const float* model16, std::uint32_t tri_packed);
 
 	/**
+	 * Draw one mesh with many model matrices (column-major 4x4 each, contiguous float32).
+	 *
+	 * Transform/clip/emit runs per instance; tile bin + fill runs once. Invalid mesh or
+	 * instance_count == 0 is a no-op. N=1 delegates to DrawMesh for parity.
+	 */
+	void DrawMeshMany(
+		int mesh_id,
+		const float* models16,
+		std::size_t instance_count,
+		std::uint32_t tri_packed);
+
+	/**
 	 * Fused poll + clear color/depth + draw_mesh + present.
 	 */
 	int TickMesh(
@@ -327,6 +339,17 @@ public:
 	 * full atlas). Invalid mesh or atlas handle is a no-op. Honors depth + cull.
 	 */
 	void DrawMeshTextured(int mesh_id, const float* model16, int atlas_id);
+
+	/**
+	 * Draw one mesh with many model matrices textured from an atlas.
+	 *
+	 * Same layout as DrawMeshMany; invalid mesh/atlas or instance_count == 0 is a no-op.
+	 */
+	void DrawMeshTexturedMany(
+		int mesh_id,
+		const float* models16,
+		std::size_t instance_count,
+		int atlas_id);
 
 	/**
 	 * Fused poll + clear color/depth + draw_mesh_textured + present.
