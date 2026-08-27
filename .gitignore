@@ -127,3 +127,4 @@ credentials.json
 !.cursor/rules/**
 !.cursor/commands/
 !.cursor/commands/**
+build-portable/
