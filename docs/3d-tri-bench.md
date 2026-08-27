@@ -42,7 +42,7 @@ ISA column updated: this VM also has AVX-512; shipped path uses AVX-512VL 8-wide
 Notes:
 
 - Tris fill pixels (half-space coverage + depth), so per-primitive cost is higher than thin lines — expect lower primitives/s than `cpu_line_3d_bench` on the same machine.
-- Tile OpenMP recovers parallelism that Layer 0 skipped for depth-on lines.
+- Layer 0 depth-on lines now use hybrid **64px row-strip** OpenMP for long spans (see [3d-wireframe-bench.md](3d-wireframe-bench.md)); tris still use full 64×64 tile OpenMP.
 - `enable_depth(False)` leaves 2D + Layer 0 paths unchanged (`reference_render_tests`, `headless_smoke_test`, `depth_wireframe_tests` remain green).
 
 ## Reproduce
