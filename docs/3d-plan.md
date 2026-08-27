@@ -1,9 +1,9 @@
 # Hyperlite 3D plan
 
 NULLLIGHT-style wireframe FPS needs project + clip + depth-tested lines first — not a scene graph.
-This document locks the four-layer roadmap. **Layer 0 is this PR.**
+This document locks the four-layer roadmap. **Layer 0 and Layer 1 are shipped.**
 
-## Layer 0 — Depth-tested wireframe (shipped here)
+## Layer 0 — Depth-tested wireframe (shipped)
 
 - Separate float32 world-space segment buffers (`x0,y0,z0,x1,y1,z1`), not Z on 2D `DrawCommand`
 - Column-major `set_view_proj` (world → clip); identity = world is clip
@@ -16,10 +16,17 @@ This document locks the four-layer roadmap. **Layer 0 is this PR.**
 - CPU path is default and works headless; no OpenMP over depth writes (no races)
 - CUDA 3D deferred
 
-## Layer 1 — Screen-space triangles
+## Layer 1 — Screen-space triangles (shipped here)
 
-- `tris_bulk` tiled raster (reuse ~64px dirty tiles)
-- Still immediate / bulk buffers; no retained mesh API yet
+- Immediate / bulk filled triangles (`tris_3d` / `tris_screen` / `tick_tris_3d`); no retained mesh yet
+- Half-space / barycentric coverage with **top-left** fill rule (shared edges: no double-write, no holes)
+- Bin into **64×64** tiles (same as framebuffer dirty tiles); OpenMP over tiles when available (each tile owns pixels → no depth races)
+- Flat color per triangle; opaque (`a=255`) is the fast path (depth test + write)
+- Translucent: src-over blend, **depth test only — no depth write**
+- World path: Sutherland–Hodgman clip in homogeneous clip space (±w, near mandatory); clipped ngon fans back to tris
+- `set_cull_backfaces(True)` default on for world path (keeps OpenGL-front after viewport Y flip); screen path culls off
+- Perspective-correct depth: interpolate `z/w` (and `1/w`) in screen space
+- Portable CPU (scalar; optional AVX2 only via existing blend helpers when the arch enables it)
 
 ## Layer 2 — Retained meshes
 
@@ -46,16 +53,23 @@ This document locks the four-layer roadmap. **Layer 0 is this PR.**
 engine = hyperlite.Engine(1280, 720, "cpu", present="headless")
 engine.enable_depth(True)
 engine.set_view_proj(matrix16)  # float32[16], column-major
+engine.set_cull_backfaces(True)  # world tris; default on
 
-# Fused world-space path
+# Fused world-space filled triangles (9 floats/tri)
+engine.tick_tris_3d(world_tris, cr, cg, cb, ca, r, g, b, a=255)
+
+# Screen-space escape hatch (pixel xy + NDC z)
+engine.tris_screen(screen_tris, r, g, b, a=255)
+
+# Fused world-space wireframe (Layer 0)
 engine.tick_lines_3d(world_segs, cr, cg, cb, ca, r, g, b, a=255, width=1)
 
 # Mixed frame
 engine.begin_frame()
 engine.clear(...)
-engine.lines_3d(world_segs, r, g, b, a, width=1)
+engine.tris_3d(world_tris, r, g, b, a)
 engine.rect_fill(...)  # HUD, no depth
 engine.tick()
 ```
 
-See [guide.md](guide.md) for call details and [3d-wireframe-bench.md](3d-wireframe-bench.md) for measured throughput.
+See [guide.md](guide.md) for call details, [3d-wireframe-bench.md](3d-wireframe-bench.md) for line throughput, and [3d-tri-bench.md](3d-tri-bench.md) for triangle throughput.

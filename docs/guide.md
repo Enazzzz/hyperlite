@@ -54,7 +54,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 
 ### Not good for (today)
 
-- Full 3D meshes, shaders, PBR, or a scene graph (depth-tested **wireframe** lines are Layer 0 — see [3d-plan.md](3d-plan.md))
+- Full 3D meshes, shaders, PBR, or a scene graph (depth-tested **wireframe** + **filled tris** are Layers 0–1 — see [3d-plan.md](3d-plan.md))
 - macOS (Windows + Linux only for now)
 - “Drop in PNG and forget” without using `load_atlas` / `blit_rgba`
 - Built-in text rendering, physics, or networking
@@ -446,6 +446,7 @@ while engine.is_running():
 | 500 – 100,000+ | `tick_lines()` or `tick_lines_poll()` | Dedicated wireframe frame |
 | Per-segment colors | `lines_bulk_colored(segments, colors, …)` | Slightly more bandwidth |
 | World-space 3D wireframe | `tick_lines_3d` / `lines_3d` + `enable_depth` | See below |
+| World-space filled tris | `tick_tris_3d` / `tris_3d` / `tris_screen` | Layer 1 |
 
 ### 3D depth-tested wireframe (Layer 0)
 
@@ -474,6 +475,27 @@ engine.tick()
 - `lines_3d_screen(segs)` takes pixel `xy` + NDC `z` in `[-1,1]` (skips view-proj).
 - `enable_depth(False)` frees the depth plane; 2D paths are unchanged.
 - Roadmap: [3d-plan.md](3d-plan.md). Benches: [3d-wireframe-bench.md](3d-wireframe-bench.md).
+
+### 3D filled triangles (Layer 1)
+
+Immediate-mode filled triangles with the same depth / view-proj plumbing as Layer 0. Tris are binned into **64×64** tiles (matching dirty present tiles) and rasterized with half-space coverage + top-left fill rule.
+
+```python
+engine.enable_depth(True)
+engine.set_view_proj(view_proj_matrix16)
+engine.set_cull_backfaces(True)  # default on for world path
+
+tris = np.zeros((N, 9), dtype=np.float32)  # x0,y0,z0, x1,y1,z1, x2,y2,z2
+engine.tick_tris_3d(tris[:n], 8, 12, 24, 255, 0, 200, 255, 255)
+
+# Screen-space (pixel xy + NDC z); cull off
+engine.tris_screen(screen_tris, 255, 80, 80, 255)
+```
+
+- Opaque (`a=255`): depth test + write. Translucent: src-over, **no depth write**.
+- World path clips in homogeneous space (near mandatory); a clipped tri can become a quad and is fanned back to tris.
+- `set_cull_backfaces(False)` draws both windings on the world path. Screen path never culls.
+- Bench numbers: [3d-tri-bench.md](3d-tri-bench.md).
 
 ### Mixed frames (wireframe + HUD + sprites)
 
@@ -1117,6 +1139,10 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `tick_lines_3d(world_segs, cr..ca, r..a, width=1)` | Poll + clear color/depth + 3D lines + present |
 | `lines_3d(world_segs, r, g, b, a=255, width=1)` | Flush pending 2D, draw world-space 3D lines |
 | `lines_3d_screen(segs, ...)` | Pixel xy + NDC z `[-1,1]` (float32×6); skips view-proj |
+| `set_cull_backfaces(bool)` / `cull_backfaces()` | World-space triangle backface cull (default on) |
+| `tick_tris_3d(world_verts, cr..ca, r..a)` | Poll + clear color/depth + filled tris + present |
+| `tris_3d(world_verts, r, g, b, a=255)` | Flush pending 2D, draw world-space filled triangles |
+| `tris_screen(verts, r, g, b, a=255)` | Pixel xy + NDC z `[-1,1]` (float32×9); cull off |
 | `tick_gpu_spiro(...)` | Poll + GPU spiro scene + present |
 
 ### Sprites & layers
@@ -1134,6 +1160,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 - `sprite_buffer`: **7 × int32 per sprite** — `(atlas_id, src_x, src_y, width, height, dst_x, dst_y)`
 - `segments`: **4 × int32 per line** — `(x0, y0, x1, y1)`
 - `world_segs` / 3D screen segs: **6 × float32 per line** — `(x0,y0,z0, x1,y1,z1)`
+- `world` / screen tris: **9 × float32 per triangle** — `(x0,y0,z0, x1,y1,z1, x2,y2,z2)`
 
 ### Advanced / introspection
 
