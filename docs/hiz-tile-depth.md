@@ -8,7 +8,8 @@ Per-64×64-tile hierarchical depth for the CPU triangle raster. When a tile’s 
 - **Tile occluder:** `tile_max` = max depth sample in the tile (farthest visible surface in that tile).
 - **Triangle nearest:** `tri_min` = min window depth over the three post-project vertices (`z/w` → `0.5*z+0.5`). Linear in screen space, so the triangle minimum is at a vertex.
 - **Reject rule:** `tri_min > tile_max` → skip `RasterScreenTriTile` for this tile (conservative: if even the nearest vertex is behind the tile’s farthest occluder, every covered pixel fails the depth test).
-- **Update:** After the first raster write in a tile, scan the tile depth once. While `tile_max < 1.0`, rescan after each subsequent write so `tile_max` stays accurate under overlapping geometry.
+- **Update:** After the first raster write in a tile, `tile_max` advances from the farthest depth actually written by that triangle (`MergeTileHiZFromWrite`). No per-triangle 64×64 depth rescan. `ScanTileMaxDepth` remains for tests / fallback (AVX2 8-wide reduction when available).
+- **Row skip:** When a triangle fully covers its pixel AABB inside the tile and every interpolated depth on a row exceeds `tile_max`, the row skips the pixel loop (conservative: `z > tile_max` implies failure vs all stored samples in the tile).
 
 OpenMP still parallelizes over tiles; Hi-Z state is per tile with no cross-tile sharing.
 
@@ -16,17 +17,28 @@ OpenMP still parallelizes over tiles; Hi-Z state is per tile with no cross-tile 
 
 Same machine class as [3d-tri-bench.md](3d-tri-bench.md).
 
-### Open workload (little overlap — no meaningful reject)
+### Open workload (little overlap — scan removal dominates)
 
-| Bench | Before Hi-Z | After Hi-Z | Δ |
-|-------|-------------|------------|---|
-| `cpu_tri_bench` | **4.51e6** tris/s (266 ms) | **4.47e6** tris/s (268 ms) | ~noise |
-| `cpu_mesh_bench` flat | **8.54e6** tris/s (138 ms) | **8.62e6** tris/s (136 ms) | ~noise |
-| `cpu_mesh_bench` textured | **7.47e6** tris/s (157 ms) | **7.56e6** tris/s (156 ms) | ~noise |
+| Bench | Before (rescan) | After (write-track) | Δ |
+|-------|-----------------|---------------------|---|
+| `cpu_tri_bench` | **4.35e6** tris/s (276 ms) | **5.72e6** tris/s (210 ms) | **~+31%** |
+| `cpu_mesh_bench` flat | **8.41e6** tris/s (140 ms) | **10.1e6** tris/s (116 ms) | **~+21%** |
+| `cpu_mesh_bench` textured | **6.98e6** tris/s (168 ms) | **9.45e6** tris/s (124 ms) | **~+35%** |
+
+Open scenes still paid a full 64×64 depth scan after most raster writes (while `tile_max < 1`). Write tracking removes that hot-path cost.
 
 ### Occluded workload (fullscreen occluder + back field)
 
-| Bench | Without Hi-Z | With Hi-Z | Δ wall time |
+| Bench | Before | After | Δ |
+|-------|--------|-------|---|
+| `cpu_tri_bench occluded` | **5.53e6** tris/s (217 ms) | **6.32e6** tris/s (190 ms) | **~+14%** |
+| `cpu_mesh_bench occluded` | **6.60e6** tris/s (178 ms) | **6.40e6** tris/s (184 ms) | **~noise** |
+
+Occluded tri gains from fewer rescans on partial occluder tiles plus row skip. Occluded mesh was already Hi-Z-bound on back tris; open mesh flat/textured were the big winners.
+
+### Historical (first Hi-Z landing vs no Hi-Z)
+
+| Bench | Without Hi-Z | With Hi-Z (rescan) | Δ wall time |
 |-------|--------------|-----------|-------------|
 | `cpu_tri_bench occluded` | 349 ms (**3.44e6** tris/s) | 201 ms (**5.96e6** tris/s) | **~−42%** |
 | `cpu_mesh_bench occluded` | 243 ms (**4.84e6** tris/s) | 167 ms (**7.04e6** tris/s) | **~−31%** |

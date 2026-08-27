@@ -54,6 +54,8 @@ Upstream of fill: transform-once, outcode clip, scratch/bin reuse. Interleaved v
 | **Textured SIMD** (AVX2 gather and AVX-512VL gather UV/depth blocks) | Net **loss** on `cpu_mesh_bench` textured vs scalar incremental UV. Dense atlas sampling prefers the tight scalar loop. **Not shipped**; textured stays scalar. |
 | **AMX** | **Skipped** (no profiler evidence a dense AMX kernel would beat tile fill; tile-config overhead wrong tool for sparse 64×64 bins). |
 | **Per-row half-plane reject** inside the AABB | Net **loss** (AABB already tight). Reverted in the AVX2 PR. |
+| **Per-triangle 64×64 `ScanTileMaxDepth` after writes** | Hot-path **loss** on open mesh/tri (rescans dominate). **Replaced** by write-track Hi-Z + optional row skip ([hiz-tile-depth.md](hiz-tile-depth.md)). |
+| **SIMD `ScanTileMaxDepth` alone** (AVX2 8-wide) | Helps only if rescans remain; write-track removes the hot-path caller. Kept for tests / fallback. |
 | **Fixed-point / subpixel edge functions** | **Not shipped** (same rationale as AVX2 PR). |
 | **OpenMP over triangles** | Still **forbidden** (depth races). Tiles own pixels. |
 
