@@ -7,8 +7,9 @@ Upgrade of the existing tiled half-space fill in `cpu_tri_raster_3d.hpp` — **n
 Inside `RasterScreenTriTile` (shared by immediate tris, flat mesh, textured mesh):
 
 1. **Incremental half-edge + attribute setup** — edge coeffs `A,B,C`, step `A` per column / `B` per row; incremental window depth and (textured) `u/w`, `v/w`, `1/w`.
-2. **Tile AABB reject** — trivial out when the pixel-center box is outside any half-plane (top-left aware). No Hi-Z.
-3. **Tile AABB accept** — when the box is inside all three half-planes, skip coverage tests (depth + color/UV only).
+2. **Tile AABB reject** — trivial out when the pixel-center box is outside any half-plane (top-left aware).
+3. **Tile Hi-Z reject** — when `tri_min > tile_max` for the 64×64 tile, skip the pixel loop ([hiz-tile-depth.md](hiz-tile-depth.md)).
+4. **Tile AABB accept** — when the box is inside all three half-planes, skip coverage tests (depth + color/UV only).
 4. **Pixel-block SIMD (opaque flat)** — AVX2 8-wide edge masks + depth/color stores; SSE4.2 4-wide fallback; scalar remainder. Gated on `__AVX2__` / `__SSE4_2__`.
 5. **AVX-512VL edge path (opaque flat)** — when `__AVX512F__` + `__AVX512VL__` are set, edge (non–fully-covered) blocks use 8-wide **ymm + k-mask** compares/stores (`FillOpaqueFlatBlock8Vl`) instead of movemask/`maskstore` casts. Same lane width as AVX2; no zmm in the hot path. Dense interior tiles keep classic AVX2 stores.
 6. **Dirty-mask bitscan** — `ExpandDirtyFromMask` walks set bits with `std::countr_zero` (helps sparse edge blocks on the immediate path; portable vs MSVC).

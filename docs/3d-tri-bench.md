@@ -45,6 +45,15 @@ Notes:
 - Tile OpenMP recovers parallelism that Layer 0 skipped for depth-on lines.
 - `enable_depth(False)` leaves 2D + Layer 0 paths unchanged (`reference_render_tests`, `headless_smoke_test`, `depth_wireframe_tests` remain green).
 
+### Tile Hi-Z depth reject (occluded workload)
+
+Open scenes (10k scattered tris / flat grid) show no meaningful change. With a fullscreen occluder + back field, wall time drops ~30–40%. Details and reproduction: [hiz-tile-depth.md](hiz-tile-depth.md).
+
+| Bench | Open (after Hi-Z) | Occluded with Hi-Z | Occluded without Hi-Z |
+|-------|-------------------|--------------------|-----------------------|
+| `cpu_tri_bench` | **4.47e6** tris/s | **5.96e6** tris/s (201 ms) | 3.44e6 tris/s (349 ms) |
+| `cpu_mesh_bench` flat | **8.62e6** tris/s | **7.04e6** tris/s (167 ms) | 4.84e6 tris/s (243 ms) |
+
 ## Reproduce
 
 ```bash

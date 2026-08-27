@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "engine/engine.hpp"
@@ -68,8 +69,7 @@ void MulMat4(const float* a, const float* b, float* out) {
 /**
  * Fill world-space triangles (small quads as two tris) in front of the camera.
  */
-void FillWorldTris(std::vector<float>& verts, const int frame) {
-	const std::size_t tri_count = verts.size() / 9U;
+void FillWorldTris(float* dst, const std::size_t tri_count, const int frame) {
 	for (std::size_t i = 0; i < tri_count; ++i) {
 		const int slot = static_cast<int>(i);
 		const float phase = static_cast<float>((slot + frame) % 97) * 0.01f;
@@ -79,24 +79,55 @@ void FillWorldTris(std::vector<float>& verts, const int frame) {
 		const float s = 0.05f;
 		const std::size_t base = i * 9U;
 		// CCW in world/NDC (OpenGL front).
-		verts[base + 0U] = x - s;
-		verts[base + 1U] = y - s;
-		verts[base + 2U] = z;
-		verts[base + 3U] = x + s;
-		verts[base + 4U] = y - s;
-		verts[base + 5U] = z;
-		verts[base + 6U] = x;
-		verts[base + 7U] = y + s;
-		verts[base + 8U] = z;
+		dst[base + 0U] = x - s;
+		dst[base + 1U] = y - s;
+		dst[base + 2U] = z;
+		dst[base + 3U] = x + s;
+		dst[base + 4U] = y - s;
+		dst[base + 5U] = z;
+		dst[base + 6U] = x;
+		dst[base + 7U] = y + s;
+		dst[base + 8U] = z;
 	}
+}
+
+/**
+ * Two tris covering the view at a nearer z (opaque occluder for Hi-Z benches).
+ */
+void FillScreenOccluderTris(float* dst) {
+	const float z = -0.05f;
+	// Tri 0
+	dst[0U] = -3.0f;
+	dst[1U] = -3.0f;
+	dst[2U] = z;
+	dst[3U] = 3.0f;
+	dst[4U] = -3.0f;
+	dst[5U] = z;
+	dst[6U] = 3.0f;
+	dst[7U] = 3.0f;
+	dst[8U] = z;
+	// Tri 1
+	dst[9U] = -3.0f;
+	dst[10U] = -3.0f;
+	dst[11U] = z;
+	dst[12U] = 3.0f;
+	dst[13U] = 3.0f;
+	dst[14U] = z;
+	dst[15U] = -3.0f;
+	dst[16U] = 3.0f;
+	dst[17U] = z;
 }
 
 } // namespace
 
 /**
  * Benchmark TickTris3d (10k world tris, perspective camera, depth on, 1280x720).
+ *
+ * Pass argv[1]=="occluded" to prepend a fullscreen occluder (2 tris) before the 10k back-field tris.
  */
-int main() {
+int main(int argc, char** argv) {
+	const bool occluded = (argc > 1 && std::string(argv[1]) == "occluded");
+
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Tri Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
 	engine.EnableDepth(true);
@@ -111,16 +142,22 @@ int main() {
 	engine.SetViewProj(view_proj);
 
 	constexpr int frame_iterations = 120;
-	constexpr std::size_t tris_per_frame = 10'000U;
+	constexpr std::size_t back_tris = 10'000U;
+	constexpr std::size_t occluder_tris = 2U;
+	const std::size_t tris_per_frame = occluded ? (occluder_tris + back_tris) : back_tris;
 	constexpr std::uint32_t clear_packed = hyperlite::PackColor({8, 12, 20, 255});
 	constexpr std::uint32_t tri_packed = hyperlite::PackColor({0, 200, 255, 255});
 
 	std::vector<float> verts(tris_per_frame * 9U);
-	FillWorldTris(verts, 0);
 
 	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int frame = 0; frame < frame_iterations; ++frame) {
-		FillWorldTris(verts, frame);
+		if (occluded) {
+			FillScreenOccluderTris(verts.data());
+			FillWorldTris(verts.data() + occluder_tris * 9U, back_tris, frame);
+		} else {
+			FillWorldTris(verts.data(), back_tris, frame);
+		}
 		engine.TickTris3d(
 			clear_packed,
 			verts.data(),
@@ -137,6 +174,9 @@ int main() {
 	std::cout << "tris_per_frame=" << tris_per_frame << '\n';
 	std::cout << "resolution=1280x720\n";
 	std::cout << "depth=on\n";
+	if (occluded) {
+		std::cout << "workload=occluded\n";
+	}
 	std::cout << "total_ms=" << ms << '\n';
 	std::cout << "tris_per_second=" << tris_per_second << '\n';
 	return 0;

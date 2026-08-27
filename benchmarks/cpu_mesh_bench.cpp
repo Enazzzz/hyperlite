@@ -124,6 +124,21 @@ void BuildGridMesh(
 	}
 }
 
+/**
+ * Fullscreen quad mesh (2 tris) nearer than the grid — occluder for Hi-Z benches.
+ */
+void BuildOccluderMesh(
+	std::vector<float>& verts,
+	std::vector<std::uint32_t>& indices) {
+	verts = {
+		-3.0f, -3.0f, -0.05f, 0.0f, 0.0f, 0.0f,
+		3.0f, -3.0f, -0.05f, 1.0f, 0.0f, 0.0f,
+		3.0f, 3.0f, -0.05f, 1.0f, 1.0f, 0.0f,
+		-3.0f, 3.0f, -0.05f, 0.0f, 1.0f, 0.0f,
+	};
+	indices = {0U, 1U, 2U, 0U, 2U, 3U};
+}
+
 } // namespace
 
 /**
@@ -131,11 +146,13 @@ void BuildGridMesh(
  *
  * Mesh: 70×70 quads × 2 tris. Drawn once per frame via TickMesh / TickMeshTextured
  * @ 1280×720 depth on. Pass argv[1]=="textured" to run the textured path only;
- * otherwise run flat then textured and print both.
+ * "flat" for flat only; "occluded" for flat with a fullscreen occluder draw first.
+ * Otherwise run flat then textured and print both.
  */
 int main(int argc, char** argv) {
 	const bool textured_only = (argc > 1 && std::string(argv[1]) == "textured");
 	const bool flat_only = (argc > 1 && std::string(argv[1]) == "flat");
+	const bool occluded = (argc > 1 && std::string(argv[1]) == "occluded");
 
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Mesh Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
@@ -155,11 +172,37 @@ int main(int argc, char** argv) {
 	std::vector<float> verts;
 	std::vector<std::uint32_t> indices;
 	BuildGridMesh(verts, indices, quads_x, quads_y);
-	const std::size_t tris_per_draw = indices.size() / 3U;
 	const int mesh = engine.LoadMesh(verts.data(), verts.size(), indices.data(), indices.size());
 	if (mesh < 0) {
 		std::cerr << "load_mesh failed\n";
 		return 1;
+	}
+
+	int draw_mesh = mesh;
+	std::size_t tris_per_draw = indices.size() / 3U;
+	if (occluded) {
+		std::vector<float> combined_verts;
+		std::vector<std::uint32_t> combined_indices;
+		std::vector<float> occ_verts;
+		std::vector<std::uint32_t> occ_indices;
+		BuildOccluderMesh(occ_verts, occ_indices);
+		combined_verts = occ_verts;
+		combined_verts.insert(combined_verts.end(), verts.begin(), verts.end());
+		combined_indices = occ_indices;
+		const std::uint32_t vert_offset = static_cast<std::uint32_t>(occ_verts.size() / 6U);
+		for (const std::uint32_t idx : indices) {
+			combined_indices.push_back(idx + vert_offset);
+		}
+		tris_per_draw = combined_indices.size() / 3U;
+		draw_mesh = engine.LoadMesh(
+			combined_verts.data(),
+			combined_verts.size(),
+			combined_indices.data(),
+			combined_indices.size());
+		if (draw_mesh < 0) {
+			std::cerr << "load_combined_mesh failed\n";
+			return 1;
+		}
 	}
 
 	// Opaque 64×64 checker atlas so textured sampling is non-trivial.
@@ -194,7 +237,7 @@ int main(int argc, char** argv) {
 		const auto t0 = std::chrono::high_resolution_clock::now();
 		for (int frame = 0; frame < frame_iterations; ++frame) {
 			model[14] = 0.001f * static_cast<float>(frame % 17);
-			engine.TickMesh(clear_packed, mesh, model, tri_packed);
+			engine.TickMesh(clear_packed, draw_mesh, model, tri_packed);
 		}
 		const auto t1 = std::chrono::high_resolution_clock::now();
 		return ElapsedMs(t0, t1);
@@ -219,10 +262,18 @@ int main(int argc, char** argv) {
 		std::cout << "draws_per_frame=1\n";
 		std::cout << "resolution=1280x720\n";
 		std::cout << "depth=on\n";
+		if (occluded) {
+			std::cout << "workload=occluded\n";
+		}
 		std::cout << "path=" << path << '\n';
 		std::cout << "total_ms=" << ms << '\n';
 		std::cout << "tris_per_second=" << tris_per_second << '\n';
 	};
+
+	if (occluded) {
+		print_result("TickMesh", run_flat());
+		return 0;
+	}
 
 	if (!textured_only) {
 		print_result("TickMesh", run_flat());
