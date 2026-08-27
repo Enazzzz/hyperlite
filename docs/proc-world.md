@@ -59,8 +59,8 @@ HYPERLITE_HEADLESS=1 .venv/bin/python python/examples/proc_world.py --preset pla
 
 | Subsystem | How |
 |-----------|-----|
-| **Fill / textured raster** | Each visible terrain chunk is a **unique** indexed heightgrid (`load_mesh` + `draw_mesh_textured`). Limit preset submits **~280k–580k tris/frame** depending on view. |
-| **Transform / clip / bin** | Trees, rocks, and cube-city blocks share three prop meshes; limit submits **~3.3k–4.1k instances/frame** via **`draw_mesh_many`** (three batches: tree / rock / city). Terrain chunks stay per-chunk `draw_mesh_textured`. |
+| **Fill / textured raster** | Each visible terrain chunk is a **unique** indexed heightgrid (`load_mesh` + `draw_mesh_textured`). Geo-mip LOD picks 41×41 / 21×21 / 11×11 grids by distance; limit preset submits **~110k–150k tris/frame** (terrain + props) vs ~280k–580k before LOD. |
+| **Transform / clip / bin** | Trees, rocks, and cube-city blocks share three prop meshes; limit submits **~3.3k–4.1k instances/frame** via **`draw_mesh_many`** (three batches: tree / rock / city). Terrain chunks stay per-chunk `draw_mesh_textured`, sorted near-to-far for Hi-Z. |
 | **Translucent path** | Sea-level water uses `draw_mesh` with `a<255` (depth test, no depth write). |
 | **2D HUD** | Rect bars only (fps, chunks, tris, props) — small but non-zero 2D work atop 3D. |
 | **Generation (startup)** | Python + NumPy builds **784** unique chunk meshes for limit (~11.5 s on the VM below). Bounded world — no streaming/`unload_mesh`. |
@@ -130,6 +130,26 @@ Props use **`draw_mesh_many`** (three batches: tree / rock / city). Terrain stay
 | Batched props (`draw_mesh_many`) | 65.2 | 15.35 | 118 | 427635 | 3612 |
 
 Dense city views: **~18.5 fps → ~37 fps** at ~578k tris/frame. See [mesh-instances.md](mesh-instances.md).
+
+### `limit` with chunk LOD + front-to-back terrain sort (8 s headless, seed=42)
+
+Terrain uses **geo-mip LOD** (full / half / quarter quad grids per chunk, swapped by camera distance) and visible chunks are drawn **near-to-far** so per-tile Hi-Z can reject far fill. Props unchanged (`draw_mesh_many`).
+
+Commands (this VM, Release, `-march=native`, OpenMP 4.5, headless):
+
+```bash
+export HYPERLITE_HEADLESS=1
+.venv/bin/python python/examples/proc_world.py --preset limit --headless --seconds 8 --seed 42
+```
+
+| | fps | ms | chunks | tris | props | gen_s |
+|---|-----|-----|--------|------|-------|-------|
+| Instancing only (main before LOD) | 66.7 | 14.99 | 117 | 424696 | 3608 | 11.55 |
+| + LOD + near-to-far sort | **109.1** | **9.17** | 121 | **126587** | 3609 | 15.41 |
+
+Per-second samples during the optimized run ranged **~73–155 fps** (city-heavy seconds **~73–75 fps** at ~140–148k tris vs **~36 fps** at ~578k tris before). Open-horizon seconds hit **~155 fps** at ~112k tris.
+
+**LOD notes:** three retained meshes per chunk (41×41 / 21×21 / 11×11 verts on `limit`). Neighbor LOD delta clamped to ≤1 to limit T-junction cracks at chunk borders. Stills (`--dump-png`) pixel-diff ≈0.06 vs pre-LOD main on `city.png` (same poses, seed 42). Startup +4 s from uploading extra LOD meshes (784 chunks → 2352 `load_mesh` calls).
 
 ## See also
 
