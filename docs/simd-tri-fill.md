@@ -11,7 +11,7 @@ Inside `RasterScreenTriTile` (shared by immediate tris, flat mesh, textured mesh
 3. **Tile AABB accept** — when the box is inside all three half-planes, skip coverage tests (depth + color/UV only).
 4. **Pixel-block SIMD (opaque flat)** — AVX2 8-wide edge masks + depth/color stores; SSE4.2 4-wide fallback; scalar remainder. Gated on `__AVX2__` / `__SSE4_2__`.
 5. **AVX-512VL edge path (opaque flat)** — when `__AVX512F__` + `__AVX512VL__` are set, edge (non–fully-covered) blocks use 8-wide **ymm + k-mask** compares/stores (`FillOpaqueFlatBlock8Vl`) instead of movemask/`maskstore` casts. Same lane width as AVX2; no zmm in the hot path. Dense interior tiles keep classic AVX2 stores.
-6. **Dirty-mask bitscan** — `ExpandDirtyFromMask` walks set bits with `__builtin_ctz` (helps sparse edge blocks on the immediate path).
+6. **Dirty-mask bitscan** — `ExpandDirtyFromMask` walks set bits with `std::countr_zero` (helps sparse edge blocks on the immediate path; portable vs MSVC).
 7. **Textured path** — same reject/accept + incremental perspective UV; **scalar** per-pixel nearest clamp (see failed experiments).
 
 Public Python/C++ API unchanged. Top-left, less-equal depth, opaque depth-write / translucent test-only, nearest clamp UV preserved. `ctest` green including `HYPERLITE_MARCH=x86-64` (no AVX2/AVX-512 required).

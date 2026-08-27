@@ -7,6 +7,7 @@
 #include "engine/framebuffer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -587,9 +588,10 @@ inline void ExpandDirtyFromMask(
 	dirty_y0 = std::min(dirty_y0, y);
 	dirty_y1 = std::max(dirty_y1, y);
 	// Bitscan over written lanes (sparse edge blocks benefit most).
+	// std::countr_zero is portable (MSVC has no __builtin_ctz).
 	unsigned m = static_cast<unsigned>(mask);
 	while (m != 0U) {
-		const int i = __builtin_ctz(m);
+		const int i = static_cast<int>(std::countr_zero(m));
 		const int x = x0 + i;
 		dirty_x0 = std::min(dirty_x0, x);
 		dirty_x1 = std::max(dirty_x1, x);
