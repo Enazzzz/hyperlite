@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/tile_hiz_state.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +30,7 @@ public:
 		width_ = std::max(0, width);
 		height_ = std::max(0, height);
 		depth_.assign(static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_), 1.0f);
+		raster::detail3d::InvalidateTileHiZ();
 	}
 
 	/**
@@ -35,6 +38,7 @@ public:
 	 */
 	void Clear(const float value = 1.0f) {
 		std::fill(depth_.begin(), depth_.end(), value);
+		raster::detail3d::InvalidateTileHiZ();
 	}
 
 	/**
@@ -45,6 +49,7 @@ public:
 		height_ = 0;
 		depth_.clear();
 		depth_.shrink_to_fit();
+		raster::detail3d::InvalidateTileHiZ();
 	}
 
 	/**

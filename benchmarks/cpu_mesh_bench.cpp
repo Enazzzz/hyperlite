@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/command_buffer.hpp"
 #include "engine/engine.hpp"
 
 namespace {
@@ -147,6 +148,7 @@ void BuildOccluderMesh(
  * Mesh: 70×70 quads × 2 tris. Drawn once per frame via TickMesh / TickMeshTextured
  * @ 1280×720 depth on. Pass argv[1]=="textured" to run the textured path only;
  * "flat" for flat only; "occluded" for flat with a fullscreen occluder draw first;
+ * "occluded-2draw" for clear + occluder DrawMesh then back-field DrawMesh (no depth clear between);
  * "instanced" for flat DrawMeshMany stress (128 instances/frame, single bin/fill).
  * Otherwise run flat then textured and print both.
  */
@@ -154,6 +156,7 @@ int main(int argc, char** argv) {
 	const bool textured_only = (argc > 1 && std::string(argv[1]) == "textured");
 	const bool flat_only = (argc > 1 && std::string(argv[1]) == "flat");
 	const bool occluded = (argc > 1 && std::string(argv[1]) == "occluded");
+	const bool occluded_2draw = (argc > 1 && std::string(argv[1]) == "occluded-2draw");
 	const bool instanced = (argc > 1 && std::string(argv[1]) == "instanced");
 
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Mesh Bench", hyperlite::PresentMode::kHeadless);
@@ -182,7 +185,24 @@ int main(int argc, char** argv) {
 
 	int draw_mesh = mesh;
 	std::size_t tris_per_draw = indices.size() / 3U;
-	if (occluded) {
+	int occluder_mesh = -1;
+	std::size_t occluder_tris = 0U;
+	if (occluded_2draw) {
+		std::vector<float> occ_verts;
+		std::vector<std::uint32_t> occ_indices;
+		BuildOccluderMesh(occ_verts, occ_indices);
+		occluder_tris = occ_indices.size() / 3U;
+		occluder_mesh = engine.LoadMesh(
+			occ_verts.data(),
+			occ_verts.size(),
+			occ_indices.data(),
+			occ_indices.size());
+		if (occluder_mesh < 0) {
+			std::cerr << "load_occluder_mesh failed\n";
+			return 1;
+		}
+		tris_per_draw = occluder_tris + (indices.size() / 3U);
+	} else if (occluded) {
 		std::vector<float> combined_verts;
 		std::vector<std::uint32_t> combined_indices;
 		std::vector<float> occ_verts;
@@ -256,21 +276,42 @@ int main(int argc, char** argv) {
 		return ElapsedMs(t0, t1);
 	};
 
-	auto print_result = [&](const char* path, const double ms) {
+	auto print_result = [&](const char* path, const double ms, const int draws_per_frame = 1) {
 		const double tris = static_cast<double>(frame_iterations) * static_cast<double>(tris_per_draw);
 		const double tris_per_second = tris / (ms / 1000.0);
 		std::cout << "frames=" << frame_iterations << '\n';
 		std::cout << "tris_per_frame=" << tris_per_draw << '\n';
-		std::cout << "draws_per_frame=1\n";
+		std::cout << "draws_per_frame=" << draws_per_frame << '\n';
 		std::cout << "resolution=1280x720\n";
 		std::cout << "depth=on\n";
 		if (occluded) {
 			std::cout << "workload=occluded\n";
 		}
+		if (occluded_2draw) {
+			std::cout << "workload=occluded-2draw\n";
+		}
 		std::cout << "path=" << path << '\n';
 		std::cout << "total_ms=" << ms << '\n';
 		std::cout << "tris_per_second=" << tris_per_second << '\n';
 	};
+
+	if (occluded_2draw) {
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		for (int frame = 0; frame < frame_iterations; ++frame) {
+			model[14] = 0.001f * static_cast<float>(frame % 17);
+			engine.BeginFrame();
+			engine.PushCommand(hyperlite::MakeDrawCommand(
+				hyperlite::CommandType::kClear, 0, 0, 0, 0, clear_packed));
+			engine.EndFrame();
+			engine.DrawMesh(occluder_mesh, model, tri_packed);
+			engine.DrawMesh(mesh, model, tri_packed);
+			engine.PollEvents();
+			engine.Present();
+		}
+		const auto t1 = std::chrono::high_resolution_clock::now();
+		print_result("DrawMesh", ElapsedMs(t0, t1), 2);
+		return 0;
+	}
 
 	if (occluded) {
 		print_result("TickMesh", run_flat());

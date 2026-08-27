@@ -9,6 +9,7 @@ Per-64×64-tile hierarchical depth for the CPU triangle raster. When a tile’s 
 - **Triangle nearest:** `tri_min` = min window depth over the three post-project vertices (`z/w` → `0.5*z+0.5`). Linear in screen space, so the triangle minimum is at a vertex.
 - **Reject rule:** `tri_min > tile_max` → skip `RasterScreenTriTile` for this tile (conservative: if even the nearest vertex is behind the tile’s farthest occluder, every covered pixel fails the depth test).
 - **Update:** After the first raster write in a tile, `tile_max` advances from the farthest depth actually written by that triangle (`MergeTileHiZFromWrite`). No per-triangle 64×64 depth rescan. `ScanTileMaxDepth` remains for tests / fallback (AVX2 8-wide reduction when available).
+- **Persist:** `tile_max_depth` is retained across `RasterScreenTrisTiled` calls until depth is cleared (`TileHiZEpoch` bump from `DepthBuffer::Clear` / `Resize` / `Reset`). Later draws in the same frame reuse prior occluder `tile_max` for `TriTileDepthReject` + span reject.
 - **Row skip:** When a triangle's pixel AABB inside the tile has every interpolated depth on a row strictly behind `tile_max`, the row skips fill work (conservative linear span min; partial edge coverage included).
 - **Block skip:** Same rule per AVX2/SSE SIMD block (8- or 4-wide) before the opaque flat fill inner loop.
 - **Front-to-back bin order:** Before tile binning, draws with depth on may reorder tris by cached `tri_min` (ascending). Nearer tris raster first so write-track `tile_max` is tighter when overlapping farther tris in the same draw are processed. Skipped when: (1) an 8-sample probe looks uniform-depth (flat mesh), (2) depth span is negligible, (3) ≤4 tris sit at the global minimum (fullscreen occluder prefix already nearest-first), or (4) >25% of tris share the minimum depth (coplanar layer — reorder cannot help).
@@ -77,6 +78,24 @@ Paired before/after on write-track + front-to-back `main` (this VM, Release, `-m
 
 Occluded / textured paths benefit when back-field tris enter tiles with tight `tile_max` but only partially overlap the AABB (row/block skip avoids SIMD fill and atlas sampling). Open scattered tris already overlap heavily after front-to-back sort; extra span checks are ~neutral.
 
+### Persist Hi-Z across draws (until depth clear), same session
+
+`RasterScreenTrisTiled` no longer `std::fill`s `tile_max_depth` at every draw. `MeshDrawScratch::tile_max_depth` survives until `DepthBuffer::Clear` / `Resize` / `Reset` bumps `TileHiZEpoch()` (also on `kClear` via `depth->Clear`). A later `Tris3d` / `DrawMesh` in the same frame rejects back-field tris against occluders from an earlier draw. Hi-Z resets when the epoch changes or tile grid size changes.
+
+Paired interleaved before/after on this VM (Release, `-march=native`, OpenMP, headless). Single-draw benches should stay ~noise; the win is on **two-draw occluded** (`occluded-2draw`).
+
+| Bench | Before (fill each draw) | After (persist) | Δ |
+|-------|-------------------------|-----------------|-----|
+| `cpu_tri_bench` | **9.02e6** tris/s | **8.61e6** tris/s | **~noise** |
+| `cpu_tri_bench occluded` | **5.20e6** tris/s | **5.58e6** tris/s | **~noise** |
+| `cpu_tri_bench occluded-2draw` | **3.13e6** tris/s | **4.37e6** tris/s | **~+40%** |
+| `cpu_mesh_bench` flat | **7.14e6** tris/s | **7.33e6** tris/s | **~noise** |
+| `cpu_mesh_bench` textured | **6.71e6** tris/s | **7.28e6** tris/s | **~noise** |
+| `cpu_mesh_bench occluded` | **5.99e6** tris/s | **3.85e6** tris/s | **~noise** (run variance) |
+| `cpu_mesh_bench occluded-2draw` | **4.34e6** tris/s | **3.53e6** tris/s | **~noise** (run variance) |
+
+Two-draw tri bench: clear + occluder `Tris3d`, then back-field `Tris3d` without clearing depth. Mesh variant: `DrawMesh` occluder then grid mesh.
+
 ## Reproduce
 
 ```bash
@@ -86,8 +105,10 @@ export HYPERLITE_HEADLESS=1
 ctest --test-dir build --output-on-failure
 ./build/cpu_tri_bench
 ./build/cpu_tri_bench occluded
+./build/cpu_tri_bench occluded-2draw
 ./build/cpu_mesh_bench flat
 ./build/cpu_mesh_bench occluded
+./build/cpu_mesh_bench occluded-2draw
 ```
 
 Portable ISA: `cmake ... -DHYPERLITE_MARCH=x86-64` (see [simd-tri-fill.md](simd-tri-fill.md)).
