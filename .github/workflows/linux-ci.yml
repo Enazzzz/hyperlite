@@ -58,6 +58,7 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -U pip setuptools wheel
           .venv/bin/pip install .
+          .venv/bin/pip install numpy
           .venv/bin/python - <<'PY'
           import hyperlite
           e = hyperlite.Engine(320, 240, "cpu", "ci", present="headless")
@@ -69,3 +70,4 @@ jobs:
           assert e.is_running()
           print("python_smoke=ok", hyperlite.__file__)
           PY
+          timeout 60 .venv/bin/python python/examples/proc_world.py --preset smoke --headless --seconds 3
