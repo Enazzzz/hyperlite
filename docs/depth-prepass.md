@@ -117,10 +117,45 @@ Portable ISA: `-DHYPERLITE_MARCH=x86-64` (see [simd-tri-fill.md](simd-tri-fill.m
 | Depth prepass (gated) | Regressed | Regressed / noise | **No** |
 | 16-bit depth | Regressed | Regressed | **No** |
 | 16×16 subtile Hi-Z | Regressed | Regressed | **No** |
+| Tile AABB depth probe (pre-edge) | ~noise | ~noise | **No** |
 
 **Keep:** float32 depth, single-pass raster, 64×64 tile Hi-Z, 8-wide SIMD fill.
 
-**Next engine directions** (not tried here): reduce **half-space setup** cost for tris that fail depth in the first few rows; SIMD/max-reduction in `ScanTileMaxDepth`; profile-guided gates tied to **estimated overlap** (tile bin count alone is a poor proxy).
+**Next engine directions** (not tried here): SIMD/max-reduction in `ScanTileMaxDepth`; profile-guided gates tied to **estimated overlap** (tile bin count alone is a poor proxy).
+
+---
+
+## 4. Tile AABB depth probe before half-space setup — **reverted (no win)**
+
+**Idea:** After tile Hi-Z vertex reject (`tri_min > tile_max`), many tris still enter `RasterScreenTriTile` when `tri_min <= tile_max` but every pixel in the tile clip fails depth. Defer `MakeHalfEdge` / SIMD constant setup until a cheap **z-only** probe on the tile-intersection AABB says the tri might write:
+
+- Build screen-linear window depth plane from vertex `zw` (no `top_left` / half-space `C` beyond one anchor eval).
+- If min depth at the four pixel-center corners of `[ix0,ix1)×[iy0,iy1)` is strictly behind `tile_max`, skip raster (linear z/w → corner min is exact min over the rectangle; triangle pixels in the clip are a subset → conservative).
+- Also call the probe from the tile loop before `RasterScreenTriTile` to skip the function entirely when it fires.
+
+**Why it should help:** Occluded / partial-overlap tris that pass vertex Hi-Z but fail every row/block depth test would skip edge + AVX2 setup.
+
+**Why it did not win on standard benches:**
+
+- `cpu_tri_bench occluded` / `occluded-2draw`: back-field tris are uniformly behind the fullscreen occluder → **`TriTileDepthReject` already skips them** before the probe runs. Remaining `RasterScreenTriTile` entries are occluder/near tris where the probe correctly does not fire.
+- Open / flat / textured: `tile_occluder_max` stays at far plane → probe gated off (~zero overhead).
+- When the probe runs but returns false (candidate tri may write), cost is one extra depth-plane eval — shows up as run-to-run noise only.
+
+**Paired interleaved before/after** (this VM, Release, `-march=native`, OpenMP, `HYPERLITE_HEADLESS=1`, three rounds each):
+
+| Bench | Before (main) | After (AABB probe) | Δ |
+|-------|-------------|---------------------|---|
+| `cpu_tri_bench` | **10.0e6** tris/s (~117 ms) | **9.9e6** tris/s (~122 ms) | ~noise |
+| `cpu_tri_bench occluded` | **6.7e6** tris/s (~178 ms) | **6.5e6** tris/s (~184 ms) | ~noise |
+| `cpu_tri_bench occluded-2draw` | **5.0e6** tris/s (~242 ms) | **5.0e6** tris/s (~241 ms) | ~noise |
+| `cpu_mesh_bench flat` | **1.10e7** tris/s (~107 ms) | **1.11e7** tris/s (~106 ms) | ~noise |
+| `cpu_mesh_bench textured` | **1.04e7** tris/s (~113 ms) | **1.04e7** tris/s (~113 ms) | ~noise |
+| `cpu_mesh_bench occluded` | **7.3e6** tris/s (~161 ms) | **7.3e6** tris/s (~160 ms) | ~noise |
+| `cpu_mesh_bench occluded-2draw` | **6.1e6** tris/s (~193 ms) | **6.1e6** tris/s (~192 ms) | ~noise |
+
+**Losers also not retried:** depth prepass, 16-bit depth, 16×16 subtile Hi-Z, per-row half-plane reject before edges, edge-coef hoisting across tiles.
+
+**Conclusion:** Do not ship. Leftover setup cost on micro-benches is mostly **binning + vertex Hi-Z**, not post-reject half-space setup. A future win may need a **different reject granularity** (e.g. partial occluders in proc-world-style tiles) or fewer bin entries — not this probe on the standard occluded paths.
 
 ## Tests
 
