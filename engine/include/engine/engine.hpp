@@ -14,6 +14,7 @@
 #include "engine/framebuffer.hpp"
 #include "engine/input_state.hpp"
 #include "engine/iwindow.hpp"
+#include "engine/mesh_store.hpp"
 #include "engine/retained_layer.hpp"
 #include "engine/sprite_draw.hpp"
 
@@ -291,6 +292,35 @@ public:
 		std::uint32_t tri_packed);
 
 	/**
+	 * Load a retained mesh (CPU-resident) and return a stable handle.
+	 *
+	 * verts: float32, 6 floats/vert — x,y,z,u,v,_pad. indices: uint32 tris (optional;
+	 * nullptr / index_count 0 = triangle list). Resident until Engine dies.
+	 */
+	int LoadMesh(
+		const float* verts,
+		std::size_t vert_floats,
+		const std::uint32_t* indices,
+		std::size_t index_count);
+
+	/**
+	 * Draw a loaded mesh with a column-major 4x4 model matrix (mesh-local → world).
+	 *
+	 * Combines model with the current view-proj, then rasterizes through the Layer 1
+	 * tiled path (depth + backface cull). Invalid handle is a no-op.
+	 */
+	void DrawMesh(int mesh_id, const float* model16, std::uint32_t tri_packed);
+
+	/**
+	 * Fused poll + clear color/depth + draw_mesh + present.
+	 */
+	int TickMesh(
+		std::uint32_t clear_packed,
+		int mesh_id,
+		const float* model16,
+		std::uint32_t tri_packed);
+
+	/**
 	 * Queue many put-pixel commands from interleaved int32 x,y pairs.
 	 */
 	void PutPixelsBuffer(const std::int32_t* xy_pairs, std::size_t count, std::uint32_t packed_color);
@@ -516,6 +546,7 @@ private:
 		0.0f, 0.0f, 1.0f, 0.0f,
 		0.0f, 0.0f, 0.0f, 1.0f};
 	AtlasStore atlas_store_{};
+	MeshStore mesh_store_{};
 	InputState input_state_{};
 	std::unique_ptr<IRenderBackend> backend_{};
 	bool pipelined_ = false;

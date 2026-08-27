@@ -601,6 +601,118 @@ inline void ClearAndRasterTris3dWorld(
 }
 
 /**
+ * Multiply column-major 4x4 matrices: out = a * b (used for MVP = view_proj * model).
+ */
+inline void MulMat4ColumnMajor(const float* a, const float* b, float* out) {
+	float tmp[16];
+	for (int col = 0; col < 4; ++col) {
+		for (int row = 0; row < 4; ++row) {
+			tmp[col * 4 + row] =
+				a[0 * 4 + row] * b[col * 4 + 0] +
+				a[1 * 4 + row] * b[col * 4 + 1] +
+				a[2 * 4 + row] * b[col * 4 + 2] +
+				a[3 * 4 + row] * b[col * 4 + 3];
+		}
+	}
+	for (int i = 0; i < 16; ++i) {
+		out[i] = tmp[i];
+	}
+}
+
+/**
+ * Raster a retained mesh: positions (xyz) + optional indices through MVP into the tiled path.
+ *
+ * mvp16 = view_proj * model (column-major). Empty indices (index_count == 0) means a triangle
+ * list over positions. Reuses EmitWorldTri + RasterScreenTrisTiled — no second rasterizer.
+ */
+inline void RasterMeshWorld(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const float* mvp16,
+	const float* positions,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint32_t tri_color,
+	const bool cull_backfaces) {
+	if (positions == nullptr || mvp16 == nullptr || vertex_count < 3U) {
+		return;
+	}
+	const int width = framebuffer.Width();
+	const int height = framebuffer.Height();
+	std::vector<detail3d::ScreenTri> screen;
+
+	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
+		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
+			return;
+		}
+		const float* p0 = positions + static_cast<std::size_t>(i0) * 3U;
+		const float* p1 = positions + static_cast<std::size_t>(i1) * 3U;
+		const float* p2 = positions + static_cast<std::size_t>(i2) * 3U;
+		detail3d::EmitWorldTri(
+			screen,
+			mvp16,
+			p0[0], p0[1], p0[2],
+			p1[0], p1[1], p1[2],
+			p2[0], p2[1], p2[2],
+			width,
+			height,
+			tri_color,
+			cull_backfaces);
+	};
+
+	if (index_count > 0U && indices != nullptr) {
+		const std::size_t tri_count = index_count / 3U;
+		screen.reserve(tri_count);
+		for (std::size_t t = 0U; t < tri_count; ++t) {
+			const std::size_t base = t * 3U;
+			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
+		}
+	} else {
+		const std::size_t tri_count = vertex_count / 3U;
+		screen.reserve(tri_count);
+		for (std::size_t t = 0U; t < tri_count; ++t) {
+			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
+			emit_indexed(i0, i0 + 1U, i0 + 2U);
+		}
+	}
+	detail3d::RasterScreenTrisTiled(framebuffer, depth, screen);
+}
+
+/**
+ * Clear color (+ depth when provided) then raster a retained mesh through MVP.
+ */
+inline void ClearAndRasterMeshWorld(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const float* mvp16,
+	const std::uint32_t clear_color,
+	const float* positions,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint32_t tri_color,
+	const bool cull_backfaces) {
+	framebuffer.ResetDirty();
+	auto* dst = reinterpret_cast<std::uint32_t*>(framebuffer.Data());
+	FillSpan(dst, framebuffer.PixelCount(), clear_color);
+	framebuffer.NoteDirtyRect(0, 0, framebuffer.Width(), framebuffer.Height());
+	if (depth != nullptr && depth->Allocated()) {
+		depth->Clear(1.0f);
+	}
+	RasterMeshWorld(
+		framebuffer,
+		depth,
+		mvp16,
+		positions,
+		vertex_count,
+		indices,
+		index_count,
+		tri_color,
+		cull_backfaces);
+}
+
+/**
  * Raster screen-space triangles: pixel xy + NDC z [-1,1] per vertex (9 floats/tri).
  *
  * Skips view-proj and frustum clip. cull_backfaces is typically off for this path.

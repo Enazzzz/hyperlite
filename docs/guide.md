@@ -54,7 +54,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 
 ### Not good for (today)
 
-- Full 3D meshes, shaders, PBR, or a scene graph (depth-tested **wireframe** + **filled tris** are Layers 0–1 — see [3d-plan.md](3d-plan.md))
+- Full 3D meshes with PBR / scene graph (depth-tested **wireframe**, **filled tris**, and **retained meshes** are Layers 0–2 — see [3d-plan.md](3d-plan.md) / [3d-meshes.md](3d-meshes.md))
 - macOS (Windows + Linux only for now)
 - “Drop in PNG and forget” without using `load_atlas` / `blit_rgba`
 - Built-in text rendering, physics, or networking
@@ -447,6 +447,7 @@ while engine.is_running():
 | Per-segment colors | `lines_bulk_colored(segments, colors, …)` | Slightly more bandwidth |
 | World-space 3D wireframe | `tick_lines_3d` / `lines_3d` + `enable_depth` | See below |
 | World-space filled tris | `tick_tris_3d` / `tris_3d` / `tris_screen` | Layer 1 |
+| Retained meshes | `load_mesh` / `draw_mesh` / `tick_mesh` | Layer 2 |
 
 ### 3D depth-tested wireframe (Layer 0)
 
@@ -496,6 +497,23 @@ engine.tris_screen(screen_tris, 255, 80, 80, 255)
 - World path clips in homogeneous space (near mandatory); a clipped tri can become a quad and is fanned back to tris.
 - `set_cull_backfaces(False)` draws both windings on the world path. Screen path never culls.
 - Bench numbers: [3d-tri-bench.md](3d-tri-bench.md).
+
+### 3D retained meshes (Layer 2)
+
+Load once, draw many times with a model matrix (like `load_atlas` + `draw_sprite`). Reuses the Layer 1 tiled raster; UVs are stored but texturing is deferred.
+
+```python
+# verts: float32 x6 per vert (x,y,z,u,v,_pad); indices: uint32 tris (or None)
+mesh = engine.load_mesh(verts, indices)
+engine.begin_frame()
+engine.clear(8, 12, 20, 255)
+engine.draw_mesh(mesh, model16, 0, 200, 255, 255)
+engine.tick()
+# or: engine.tick_mesh(mesh, model16, 8, 12, 20, 255, 0, 200, 255, 255)
+```
+
+- Honors `enable_depth` and `set_cull_backfaces` (same as world `tris_3d`).
+- Flat color only in v1 — see [3d-meshes.md](3d-meshes.md). Benches: [3d-mesh-bench.md](3d-mesh-bench.md).
 
 ### Mixed frames (wireframe + HUD + sprites)
 
@@ -1142,7 +1160,10 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `set_cull_backfaces(bool)` / `cull_backfaces()` | World-space triangle backface cull (default on) |
 | `tick_tris_3d(world_verts, cr..ca, r..a)` | Poll + clear color/depth + filled tris + present |
 | `tris_3d(world_verts, r, g, b, a=255)` | Flush pending 2D, draw world-space filled triangles |
-| `tris_screen(verts, r, g, b, a=255)` | Pixel xy + NDC z `[-1,1]` (float32×9); cull off |
+| `tris_screen(screen_verts, r, g, b, a=255)` | Pixel xy + NDC z `[-1,1]` (float32×9); cull off |
+| `load_mesh(verts, indices=None)` | → int handle (float32×6/vert; uint32 indices optional) |
+| `draw_mesh(mesh, model16, r, g, b, a=255)` | Draw retained mesh with column-major model |
+| `tick_mesh(mesh, model16, cr..ca, r..a)` | Poll + clear + draw_mesh + present |
 | `tick_gpu_spiro(...)` | Poll + GPU spiro scene + present |
 
 ### Sprites & layers
@@ -1161,6 +1182,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 - `segments`: **4 × int32 per line** — `(x0, y0, x1, y1)`
 - `world_segs` / 3D screen segs: **6 × float32 per line** — `(x0,y0,z0, x1,y1,z1)`
 - `world` / screen tris: **9 × float32 per triangle** — `(x0,y0,z0, x1,y1,z1, x2,y2,z2)`
+- mesh verts: **6 × float32 per vertex** — `(x,y,z,u,v,_pad)`; indices: **uint32** (3 per tri)
 
 ### Advanced / introspection
 

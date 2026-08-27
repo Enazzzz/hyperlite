@@ -605,6 +605,69 @@ void Engine::TrisScreen(
 		false);
 }
 
+int Engine::LoadMesh(
+	const float* verts,
+	const std::size_t vert_floats,
+	const std::uint32_t* indices,
+	const std::size_t index_count) {
+	return mesh_store_.Load(verts, vert_floats, indices, index_count);
+}
+
+void Engine::DrawMesh(const int mesh_id, const float* model16, const std::uint32_t tri_packed) {
+	const MeshEntry* mesh = mesh_store_.Get(mesh_id);
+	if (mesh == nullptr || model16 == nullptr) {
+		return;
+	}
+	FlushPending2d();
+	float mvp[16];
+	raster::MulMat4ColumnMajor(view_proj_.data(), model16, mvp);
+	const std::uint32_t* indices = mesh->indices.empty() ? nullptr : mesh->indices.data();
+	const std::size_t index_count = mesh->indices.size();
+	raster::RasterMeshWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		mvp,
+		mesh->positions.data(),
+		mesh->vertex_count,
+		indices,
+		index_count,
+		tri_packed,
+		cull_backfaces_);
+}
+
+int Engine::TickMesh(
+	const std::uint32_t clear_packed,
+	const int mesh_id,
+	const float* model16,
+	const std::uint32_t tri_packed) {
+	const MeshEntry* mesh = mesh_store_.Get(mesh_id);
+	if (mesh == nullptr || model16 == nullptr) {
+		PollEvents();
+		Present();
+		return 0;
+	}
+	PollEvents();
+	const auto raster_start = std::chrono::steady_clock::now();
+	float mvp[16];
+	raster::MulMat4ColumnMajor(view_proj_.data(), model16, mvp);
+	const std::uint32_t* indices = mesh->indices.empty() ? nullptr : mesh->indices.data();
+	const std::size_t index_count = mesh->indices.size();
+	raster::ClearAndRasterMeshWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		mvp,
+		clear_packed,
+		mesh->positions.data(),
+		mesh->vertex_count,
+		indices,
+		index_count,
+		tri_packed,
+		cull_backfaces_);
+	wireframe_raster_ms_ = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - raster_start).count());
+	Present();
+	return static_cast<int>(mesh->triangle_count);
+}
+
 float Engine::DepthAt(const int x, const int y) const {
 	if (!depth_enabled_ || !depth_buffer_.Allocated()) {
 		return 1.0f;
