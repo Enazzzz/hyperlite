@@ -138,8 +138,23 @@ inline void ClipPolyAgainstPlane(
  *
  * Returns the output vertex count (0 if fully clipped). out_verts holds up to 16.
  * Near plane is mandatory; a clipped tri may become a quad/ngon (fan later).
+ *
+ * Uses outcodes for trivial accept (copy 3 verts, skip Sutherland–Hodgman) and
+ * trivial reject (all three outside the same plane). Partial clips still run SH.
  */
 inline int ClipTriangleHomogeneous(const ClipVert& a, const ClipVert& b, const ClipVert& c, ClipVert* out_verts) {
+	const int ca = ComputeClipOutcode(a);
+	const int cb = ComputeClipOutcode(b);
+	const int cc = ComputeClipOutcode(c);
+	if ((ca & cb & cc) != 0) {
+		return 0;
+	}
+	if ((ca | cb | cc) == 0) {
+		out_verts[0] = a;
+		out_verts[1] = b;
+		out_verts[2] = c;
+		return 3;
+	}
 	ClipVert buf_a[16];
 	ClipVert buf_b[16];
 	buf_a[0] = a;
@@ -1145,6 +1160,227 @@ inline void ProjectFanToScreen(
 }
 
 /**
+ * Per-draw scratch for mesh transform / emit / tile bins (reused across draws).
+ *
+ * Process-static via GetMeshDrawScratch() so DrawMesh / TickMesh avoid per-frame heap
+ * churn without TLS (which breaks non-PIC static → Python .so links). Emit + bin setup
+ * run on one thread; OpenMP only reads bins afterward.
+ */
+struct MeshDrawScratch {
+	/** Homogeneous clip-space verts after MVP (one per mesh vertex). */
+	std::vector<ClipVert> clip_verts{};
+	/** Per-vert frustum outcodes matching clip_verts. */
+	std::vector<int> outcodes{};
+	/** Screen attrs valid when outcodes[i] == 0 (trivial-in). */
+	std::vector<float> px{};
+	std::vector<float> py{};
+	std::vector<float> zw{};
+	std::vector<float> iw{};
+	/** Emitted screen triangles for the current draw. */
+	std::vector<ScreenTri> screen{};
+	/** 64×64 tile → triangle index lists (capacity retained across frames). */
+	std::vector<std::vector<std::uint32_t>> bins{};
+};
+
+/**
+ * Process-wide mesh scratch (emit + bin setup are single-threaded before OpenMP fill).
+ *
+ * Not thread_local: TLS in a non-PIC static archive fails when linking the Python .so
+ * (R_X86_64_TPOFF32). OpenMP workers only read bins after this thread finishes binning.
+ */
+inline MeshDrawScratch& GetMeshDrawScratch() {
+	static MeshDrawScratch scratch;
+	return scratch;
+}
+
+/**
+ * Transform mesh positions through column-major MVP; write clip + outcodes.
+ *
+ * When outcode == 0, also perspective-divides into px/py/zw/iw (project once per vert).
+ * AVX2 path gathers 8 AoS xyz lanes when __AVX2__ is defined; scalar remainder / portable.
+ */
+inline void TransformMeshPositions(
+	const float* mvp,
+	const float* positions,
+	const std::size_t vertex_count,
+	ClipVert* clip_out,
+	int* codes_out,
+	float* px_out,
+	float* py_out,
+	float* zw_out,
+	float* iw_out,
+	const int width,
+	const int height) {
+	std::size_t i = 0U;
+	// 8-wide AoS gather + mat4 needs AVX2+FMA (native Release). Portable/x86-64 stays scalar.
+#if defined(__AVX2__) && defined(__FMA__)
+	const __m256 m0 = _mm256_set1_ps(mvp[0]);
+	const __m256 m1 = _mm256_set1_ps(mvp[1]);
+	const __m256 m2 = _mm256_set1_ps(mvp[2]);
+	const __m256 m3 = _mm256_set1_ps(mvp[3]);
+	const __m256 m4 = _mm256_set1_ps(mvp[4]);
+	const __m256 m5 = _mm256_set1_ps(mvp[5]);
+	const __m256 m6 = _mm256_set1_ps(mvp[6]);
+	const __m256 m7 = _mm256_set1_ps(mvp[7]);
+	const __m256 m8 = _mm256_set1_ps(mvp[8]);
+	const __m256 m9 = _mm256_set1_ps(mvp[9]);
+	const __m256 m10 = _mm256_set1_ps(mvp[10]);
+	const __m256 m11 = _mm256_set1_ps(mvp[11]);
+	const __m256 m12 = _mm256_set1_ps(mvp[12]);
+	const __m256 m13 = _mm256_set1_ps(mvp[13]);
+	const __m256 m14 = _mm256_set1_ps(mvp[14]);
+	const __m256 m15 = _mm256_set1_ps(mvp[15]);
+	alignas(32) float ox[8];
+	alignas(32) float oy[8];
+	alignas(32) float oz[8];
+	alignas(32) float ow[8];
+	for (; i + 8U <= vertex_count; i += 8U) {
+		const int base = static_cast<int>(i * 3U);
+		const __m256i off = _mm256_setr_epi32(base, base + 3, base + 6, base + 9, base + 12, base + 15, base + 18, base + 21);
+		const __m256 vx = _mm256_i32gather_ps(positions, off, 4);
+		const __m256 vy = _mm256_i32gather_ps(positions, _mm256_add_epi32(off, _mm256_set1_epi32(1)), 4);
+		const __m256 vz = _mm256_i32gather_ps(positions, _mm256_add_epi32(off, _mm256_set1_epi32(2)), 4);
+		const __m256 cx = _mm256_fmadd_ps(m0, vx, _mm256_fmadd_ps(m4, vy, _mm256_fmadd_ps(m8, vz, m12)));
+		const __m256 cy = _mm256_fmadd_ps(m1, vx, _mm256_fmadd_ps(m5, vy, _mm256_fmadd_ps(m9, vz, m13)));
+		const __m256 cz = _mm256_fmadd_ps(m2, vx, _mm256_fmadd_ps(m6, vy, _mm256_fmadd_ps(m10, vz, m14)));
+		const __m256 cw = _mm256_fmadd_ps(m3, vx, _mm256_fmadd_ps(m7, vy, _mm256_fmadd_ps(m11, vz, m15)));
+		_mm256_store_ps(ox, cx);
+		_mm256_store_ps(oy, cy);
+		_mm256_store_ps(oz, cz);
+		_mm256_store_ps(ow, cw);
+		for (int lane = 0; lane < 8; ++lane) {
+			const std::size_t vi = i + static_cast<std::size_t>(lane);
+			ClipVert& c = clip_out[vi];
+			c.x = ox[lane];
+			c.y = oy[lane];
+			c.z = oz[lane];
+			c.w = ow[lane];
+			c.u = 0.0f;
+			c.v = 0.0f;
+			const int code = ComputeClipOutcode(c);
+			codes_out[vi] = code;
+			if (code == 0) {
+				if (!ProjectToPixels(c, width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])) {
+					// Force SH path if perspective divide fails.
+					codes_out[vi] = kNear;
+				}
+			}
+		}
+	}
+#endif
+	for (; i < vertex_count; ++i) {
+		const float* p = positions + i * 3U;
+		ClipVert& c = clip_out[i];
+		c = MulViewProj(mvp, p[0], p[1], p[2]);
+		c.u = 0.0f;
+		c.v = 0.0f;
+		const int code = ComputeClipOutcode(c);
+		codes_out[i] = code;
+		if (code == 0) {
+			if (!ProjectToPixels(c, width, height, px_out[i], py_out[i], zw_out[i], iw_out[i])) {
+				codes_out[i] = kNear;
+			}
+		}
+	}
+}
+
+/**
+ * Sutherland–Hodgman clip without re-running outcode accept/reject (caller already knows).
+ */
+inline int ClipTriangleHomogeneousPartial(
+	const ClipVert& a,
+	const ClipVert& b,
+	const ClipVert& c,
+	ClipVert* out_verts) {
+	ClipVert buf_a[16];
+	ClipVert buf_b[16];
+	buf_a[0] = a;
+	buf_a[1] = b;
+	buf_a[2] = c;
+	int count = 3;
+	constexpr int kPlanes[6] = {kLeft, kRight, kBottom, kTop, kNear, kFar};
+	ClipVert* src = buf_a;
+	ClipVert* dst = buf_b;
+	for (const int plane : kPlanes) {
+		int out_count = 0;
+		ClipPolyAgainstPlane(src, count, dst, out_count, plane);
+		count = out_count;
+		if (count < 3) {
+			return 0;
+		}
+		ClipVert* tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+	for (int i = 0; i < count; ++i) {
+		out_verts[i] = src[i];
+	}
+	return count;
+}
+
+/**
+ * Emit one indexed triangle from pre-transformed clip verts (flat or textured).
+ *
+ * Trivial-accept uses project-once screen attrs; partial clips run Sutherland–Hodgman.
+ */
+inline void EmitIndexedClipTri(
+	std::vector<ScreenTri>& out,
+	const ClipVert* clip_verts,
+	const int* outcodes,
+	const float* px,
+	const float* py,
+	const float* zw,
+	const float* iw,
+	const std::uint32_t i0,
+	const std::uint32_t i1,
+	const std::uint32_t i2,
+	const int width,
+	const int height,
+	const std::uint32_t color,
+	const bool cull_backfaces,
+	const float u0,
+	const float v0,
+	const float u1,
+	const float v1,
+	const float u2,
+	const float v2,
+	const std::uint8_t* atlas_rgba,
+	const int atlas_w,
+	const int atlas_h) {
+	const int ca = outcodes[i0];
+	const int cb = outcodes[i1];
+	const int cc = outcodes[i2];
+	if ((ca & cb & cc) != 0) {
+		return;
+	}
+	if ((ca | cb | cc) == 0) {
+		TryAppendScreenTri(
+			out,
+			px[i0], py[i0], zw[i0], iw[i0], u0, v0,
+			px[i1], py[i1], zw[i1], iw[i1], u1, v1,
+			px[i2], py[i2], zw[i2], iw[i2], u2, v2,
+			color,
+			cull_backfaces,
+			atlas_rgba,
+			atlas_w,
+			atlas_h);
+		return;
+	}
+	ClipVert a = clip_verts[i0];
+	ClipVert b = clip_verts[i1];
+	ClipVert c = clip_verts[i2];
+	a.u = u0;
+	a.v = v0;
+	b.u = u1;
+	b.v = v1;
+	c.u = u2;
+	c.v = v2;
+	ClipVert clipped[16];
+	const int n = ClipTriangleHomogeneousPartial(a, b, c, clipped);
+	ProjectFanToScreen(out, clipped, n, width, height, color, cull_backfaces, atlas_rgba, atlas_w, atlas_h);
+}
+
+/**
  * Transform + clip + project one world-space triangle into screen tris (0..N).
  *
  * Optional per-vertex UVs + atlas enable Layer 2.1 textured fill; defaults keep flat color.
@@ -1215,6 +1451,9 @@ inline void EmitScreenTri(
 
 /**
  * Bin screen tris into 64×64 tiles and raster (OpenMP over tiles — each tile owns pixels).
+ *
+ * Reuses thread-local bin vectors across calls (clear, keep capacity). AABB uses nested
+ * min/max (no initializer_list). No per-pixel work in the bin pass.
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -1231,15 +1470,24 @@ inline void RasterScreenTrisTiled(
 	const int tiles_y = std::max(1, (height + kTile - 1) / kTile);
 	const int tile_count = tiles_x * tiles_y;
 
-	std::vector<std::vector<std::uint32_t>> bins(static_cast<std::size_t>(tile_count));
+	MeshDrawScratch& scratch = GetMeshDrawScratch();
+	auto& bins = scratch.bins;
+	if (static_cast<int>(bins.size()) != tile_count) {
+		bins.assign(static_cast<std::size_t>(tile_count), {});
+	} else {
+		for (auto& bin : bins) {
+			bin.clear();
+		}
+	}
+
 	PixelBounds global_bounds{};
 
 	for (std::uint32_t ti = 0U; ti < static_cast<std::uint32_t>(tris.size()); ++ti) {
 		const ScreenTri& t = tris[ti];
-		const float min_x = std::min({t.x0, t.x1, t.x2});
-		const float min_y = std::min({t.y0, t.y1, t.y2});
-		const float max_x = std::max({t.x0, t.x1, t.x2});
-		const float max_y = std::max({t.y0, t.y1, t.y2});
+		const float min_x = std::min(t.x0, std::min(t.x1, t.x2));
+		const float min_y = std::min(t.y0, std::min(t.y1, t.y2));
+		const float max_x = std::max(t.x0, std::max(t.x1, t.x2));
+		const float max_y = std::max(t.y0, std::max(t.y1, t.y2));
 		int tx0 = static_cast<int>(std::floor(min_x)) / kTile;
 		int ty0 = static_cast<int>(std::floor(min_y)) / kTile;
 		int tx1 = static_cast<int>(std::floor(max_x)) / kTile;
@@ -1252,8 +1500,9 @@ inline void RasterScreenTrisTiled(
 			continue;
 		}
 		for (int ty = ty0; ty <= ty1; ++ty) {
+			const int row = ty * tiles_x;
 			for (int tx = tx0; tx <= tx1; ++tx) {
-				bins[static_cast<std::size_t>(ty * tiles_x + tx)].push_back(ti);
+				bins[static_cast<std::size_t>(row + tx)].push_back(ti);
 			}
 		}
 	}
@@ -1317,6 +1566,7 @@ inline void RasterScreenTrisTiled(
  * Raster world-space triangles [x0,y0,z0, x1,y1,z1, x2,y2,z2, ...] with view-proj + optional depth.
  *
  * cull_backfaces defaults on for the world path (OpenGL-front kept after Y flip).
+ * Reuses thread-local screen scratch (no shared verts — each corner transformed once per tri).
  */
 inline void RasterTris3dWorld(
 	FrameBuffer& framebuffer,
@@ -1331,7 +1581,9 @@ inline void RasterTris3dWorld(
 	}
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
-	std::vector<detail3d::ScreenTri> screen;
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
 	screen.reserve(tri_count);
 	for (std::size_t i = 0U; i < tri_count; ++i) {
 		const std::size_t base = i * 9U;
@@ -1400,7 +1652,8 @@ inline void MulMat4ColumnMajor(const float* a, const float* b, float* out) {
  * Raster a retained mesh: positions (xyz) + optional indices through MVP into the tiled path.
  *
  * mvp16 = view_proj * model (column-major). Empty indices (index_count == 0) means a triangle
- * list over positions. Reuses EmitWorldTri + RasterScreenTrisTiled — no second rasterizer.
+ * list over positions. Transforms each unique vertex once (AVX2 gather when available), then
+ * outcode accept/reject + project-once for fully-visible verts. Reuses RasterScreenTrisTiled.
  */
 inline void RasterMeshWorld(
 	FrameBuffer& framebuffer,
@@ -1417,25 +1670,57 @@ inline void RasterMeshWorld(
 	}
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
-	std::vector<detail3d::ScreenTri> screen;
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	scratch.clip_verts.resize(vertex_count);
+	scratch.outcodes.resize(vertex_count);
+	scratch.px.resize(vertex_count);
+	scratch.py.resize(vertex_count);
+	scratch.zw.resize(vertex_count);
+	scratch.iw.resize(vertex_count);
+	detail3d::TransformMeshPositions(
+		mvp16,
+		positions,
+		vertex_count,
+		scratch.clip_verts.data(),
+		scratch.outcodes.data(),
+		scratch.px.data(),
+		scratch.py.data(),
+		scratch.zw.data(),
+		scratch.iw.data(),
+		width,
+		height);
+
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
 
 	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
 		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
 			return;
 		}
-		const float* p0 = positions + static_cast<std::size_t>(i0) * 3U;
-		const float* p1 = positions + static_cast<std::size_t>(i1) * 3U;
-		const float* p2 = positions + static_cast<std::size_t>(i2) * 3U;
-		detail3d::EmitWorldTri(
+		detail3d::EmitIndexedClipTri(
 			screen,
-			mvp16,
-			p0[0], p0[1], p0[2],
-			p1[0], p1[1], p1[2],
-			p2[0], p2[1], p2[2],
+			scratch.clip_verts.data(),
+			scratch.outcodes.data(),
+			scratch.px.data(),
+			scratch.py.data(),
+			scratch.zw.data(),
+			scratch.iw.data(),
+			i0,
+			i1,
+			i2,
 			width,
 			height,
 			tri_color,
-			cull_backfaces);
+			cull_backfaces,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			nullptr,
+			0,
+			0);
 	};
 
 	if (index_count > 0U && indices != nullptr) {
@@ -1494,7 +1779,7 @@ inline void ClearAndRasterMeshWorld(
  *
  * uvs: 2 floats/vert (u,v). UV 0..1 covers the full atlas; nearest + clamp.
  * atlas_rgba null or non-positive size → no-op (caller should validate).
- * Reuses EmitWorldTri + RasterScreenTrisTiled — no second rasterizer.
+ * Same transform-once / outcode / scratch path as RasterMeshWorld.
  */
 inline void RasterMeshTexturedWorld(
 	FrameBuffer& framebuffer,
@@ -1517,7 +1802,28 @@ inline void RasterMeshTexturedWorld(
 	}
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
-	std::vector<detail3d::ScreenTri> screen;
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	scratch.clip_verts.resize(vertex_count);
+	scratch.outcodes.resize(vertex_count);
+	scratch.px.resize(vertex_count);
+	scratch.py.resize(vertex_count);
+	scratch.zw.resize(vertex_count);
+	scratch.iw.resize(vertex_count);
+	detail3d::TransformMeshPositions(
+		mvp16,
+		positions,
+		vertex_count,
+		scratch.clip_verts.data(),
+		scratch.outcodes.data(),
+		scratch.px.data(),
+		scratch.py.data(),
+		scratch.zw.data(),
+		scratch.iw.data(),
+		width,
+		height);
+
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
 	// Flat color unused when atlas is set; pass opaque white as a harmless placeholder.
 	constexpr std::uint32_t kUnusedFlat = 0xFFFFFFFFU;
 
@@ -1525,25 +1831,30 @@ inline void RasterMeshTexturedWorld(
 		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
 			return;
 		}
-		const float* p0 = positions + static_cast<std::size_t>(i0) * 3U;
-		const float* p1 = positions + static_cast<std::size_t>(i1) * 3U;
-		const float* p2 = positions + static_cast<std::size_t>(i2) * 3U;
 		const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
 		const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
 		const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
-		detail3d::EmitWorldTri(
+		detail3d::EmitIndexedClipTri(
 			screen,
-			mvp16,
-			p0[0], p0[1], p0[2],
-			p1[0], p1[1], p1[2],
-			p2[0], p2[1], p2[2],
+			scratch.clip_verts.data(),
+			scratch.outcodes.data(),
+			scratch.px.data(),
+			scratch.py.data(),
+			scratch.zw.data(),
+			scratch.iw.data(),
+			i0,
+			i1,
+			i2,
 			width,
 			height,
 			kUnusedFlat,
 			cull_backfaces,
-			t0[0], t0[1],
-			t1[0], t1[1],
-			t2[0], t2[1],
+			t0[0],
+			t0[1],
+			t1[0],
+			t1[1],
+			t2[0],
+			t2[1],
 			atlas_rgba,
 			atlas_w,
 			atlas_h);
@@ -1621,7 +1932,9 @@ inline void RasterTris3dScreen(
 	if (tri_count == 0U || verts == nullptr) {
 		return;
 	}
-	std::vector<detail3d::ScreenTri> screen;
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
 	screen.reserve(tri_count);
 	for (std::size_t i = 0U; i < tri_count; ++i) {
 		const std::size_t base = i * 9U;

@@ -40,6 +40,10 @@ Interleaved before/after on the same binaries (8 pairs, Release headless). Means
 
 Immediate path is still the fill/edge-bound winner (tiny scattered tris). Mesh grids remain more transform/clip/bin bound, so edge-mask / bitscan tweaks barely move them. See [3d-tri-bench.md](3d-tri-bench.md) / [3d-mesh-bench.md](3d-mesh-bench.md).
 
+### Mesh transform / clip / bin (follow-up)
+
+Upstream of fill: transform-once, outcode clip, scratch/bin reuse. Interleaved vs this AVX-512VL main on the same VM: mesh flat **~+55%**, textured **~+47%**, immediate **~+24%** (no fill rewrite). Details: [mesh-transform.md](mesh-transform.md).
+
 ## Failed / dropped experiments
 
 | Experiment | Result |

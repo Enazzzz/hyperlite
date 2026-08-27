@@ -43,6 +43,16 @@ Workload: **120 frames @ 1280×720**, vsync off, headless, depth on, backface cu
 
 Mesh stays transform/clip/bin bound relative to fill; AVX-512VL edge masks + bitscan help the immediate path more. Textured gather SIMD was tried and dropped (scalar UV still wins). See [simd-tri-fill.md](simd-tri-fill.md).
 
+### Mesh transform / clip / bin (vs AVX-512VL main, interleaved 8 pairs)
+
+| Bench | Path | Before | After | Δ |
+|-------|------|--------|-------|---|
+| `cpu_mesh_bench` (flat) | `TickMesh` | **5.31e6** | **8.26e6** | **~+55%** |
+| `cpu_mesh_bench` (textured) | `TickMeshTextured` | **5.21e6** | **7.68e6** | **~+47%** |
+| `cpu_tri_bench` (immediate) | `TickTris3d` | **3.82e6** | **4.74e6** | **~+24%** |
+
+See [mesh-transform.md](mesh-transform.md).
+
 Notes:
 
 - Mesh path loads once (`load_mesh`), then draws with identity/near-identity model each frame — no per-frame vertex upload from the caller.
