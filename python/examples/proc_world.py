@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -795,6 +796,95 @@ def _draw_hud(engine: hyperlite.Engine, width: int, height: int, fps: float, sta
 	engine.rect_fill(0, height - 5, width, 5, 60, 120, 200, 255 if preset == "play" else 200)
 
 
+def _still_poses(world: ProcWorld) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+	"""Documented camera poses for marketing stills (eye, look_target)."""
+	city_x, city_z = world._city_origin()
+	city_y = world.noise.height(city_x, city_z)
+
+	# Cube city — southwest ridge, pitched down so blocks sit on textured terrain.
+	city_eye = np.array([city_x - 72.0, city_y + 38.0, city_z - 88.0], dtype=np.float64)
+	city_target = np.array([city_x + 8.0, city_y + 2.0, city_z + 6.0], dtype=np.float64)
+
+	# Mountains — aim at a high ridge with banded terrain and valley water.
+	ridge_x, ridge_z = 532.0, 335.0
+	ridge_y = world.noise.height(ridge_x, ridge_z)
+	terrain_eye = np.array([ridge_x + 95.0, ridge_y + 28.0, ridge_z - 120.0], dtype=np.float64)
+	terrain_target = np.array([ridge_x - 40.0, ridge_y * 0.45, ridge_z + 55.0], dtype=np.float64)
+
+	# Forest — dense tree bin away from the city (64 m cell around x≈288, z≈480).
+	forest_x, forest_z = 288.0, 480.0
+	forest_h = world.noise.height(forest_x, forest_z)
+	forest_eye = np.array([forest_x - 38.0, forest_h + 14.0, forest_z - 32.0], dtype=np.float64)
+	forest_target = np.array([forest_x + 55.0, forest_h + 5.0, forest_z + 40.0], dtype=np.float64)
+
+	# Low flight over southwest water/plains toward the cube city.
+	water_eye = np.array([48.0, 4.5, 72.0], dtype=np.float64)
+	water_target = np.array([city_x, city_y + 6.0, city_z - 12.0], dtype=np.float64)
+
+	return {
+		"city": (city_eye, city_target),
+		"terrain": (terrain_eye, terrain_target),
+		"forest": (forest_eye, forest_target),
+		"water": (water_eye, water_target),
+	}
+
+
+def _save_framebuffer_png(engine: hyperlite.Engine, width: int, height: int, path: str) -> None:
+	"""Write the host RGBA8 framebuffer to a PNG file."""
+	from PIL import Image
+
+	view = engine.framebuffer_ptr()
+	rgba = np.frombuffer(view, dtype=np.uint8, count=width * height * 4).reshape(height, width, 4)
+	Image.fromarray(rgba, mode="RGBA").save(path)
+
+
+def _render_still(
+	engine: hyperlite.Engine,
+	world: ProcWorld,
+	width: int,
+	height: int,
+	camera_pos: np.ndarray,
+	look_target: np.ndarray,
+	preset_name: str,
+) -> FrameStats:
+	"""Draw one posed frame and rasterize it for framebuffer capture."""
+	up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+	view = mat4_look_at(camera_pos, look_target, up)
+	aspect = width / max(height, 1)
+	proj = mat4_perspective(math.radians(70.0), aspect, 0.5, 600.0)
+	view_proj = mat4_mul(proj, view)
+
+	engine.begin_frame()
+	engine.set_view_proj(view_proj)
+	engine.clear(120, 170, 220, 255)
+	stats = world.draw(engine, view_proj, camera_pos.astype(np.float32))
+	_draw_hud(engine, width, height, 60.0, stats, preset_name)
+	engine.tick()
+	return stats
+
+
+def _dump_still_pngs(
+	engine: hyperlite.Engine,
+	world: ProcWorld,
+	cfg: PresetConfig,
+	width: int,
+	height: int,
+	out_dir: str,
+) -> int:
+	"""Render posed stills and save PNGs under out_dir."""
+	os.makedirs(out_dir, exist_ok=True)
+	poses = _still_poses(world)
+	for name, (eye, target) in poses.items():
+		path = os.path.join(out_dir, f"{name}.png")
+		stats = _render_still(engine, world, width, height, eye, target, cfg.name)
+		_save_framebuffer_png(engine, width, height, path)
+		print(
+			f"dumped {path} chunks={stats.chunks_drawn} "
+			f"tris={stats.tris_submitted} props={stats.props_drawn}"
+		)
+	return 0
+
+
 def _autopilot_camera(t: float, world: ProcWorld) -> tuple[np.ndarray, np.ndarray, float, float]:
 	"""Deterministic figure-eight fly path for headless benches."""
 	extent = world.extent
@@ -826,6 +916,12 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 	parser.add_argument("--width", type=int, default=None)
 	parser.add_argument("--height", type=int, default=None)
 	parser.add_argument("--vsync", action="store_true", help="Enable vsync (default off for bench)")
+	parser.add_argument(
+		"--dump-png",
+		metavar="DIR",
+		default=None,
+		help="Headless: render posed stills (city/terrain/forest/water) to DIR and exit",
+	)
 	return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -835,7 +931,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 	cfg = PRESETS[args.preset]
 	width = args.width if args.width is not None else cfg.width
 	height = args.height if args.height is not None else cfg.height
-	headless = args.headless or cfg.headless
+	headless = args.headless or cfg.headless or args.dump_png is not None
 	autopilot = args.auto or headless
 	run_seconds = args.seconds if args.seconds is not None else cfg.default_seconds
 	present = "headless" if headless else "auto"
@@ -846,6 +942,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 	engine.set_cull_backfaces(True)
 
 	world = ProcWorld(cfg, args.seed, engine)
+
+	if args.dump_png is not None:
+		return _dump_still_pngs(engine, world, cfg, width, height, args.dump_png)
 
 	camera_pos = np.array([world.extent * 0.35, 40.0, world.extent * 0.35], dtype=np.float64)
 	yaw_deg = -135.0

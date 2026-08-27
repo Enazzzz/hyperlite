@@ -29,8 +29,31 @@ HYPERLITE_HEADLESS=1 .venv/bin/python python/examples/proc_world.py --preset lim
 | `--seconds N` | Auto-exit after N seconds |
 | `--width / --height` | Override framebuffer size |
 | `--vsync` | Enable vsync (default **off** for uncapped bench) |
+| `--dump-png DIR` | Headless: render posed stills (`city`, `terrain`, `forest`, `water`) to DIR and exit |
 
 Controls when windowed: **WASD** move, **Space/Ctrl** up/down, **Enter** or **click** to capture mouse, **Esc** release/quit.
+
+## Stills
+
+Real CPU framebuffer dumps from `--preset play --headless --seed 42` (1280×720, depth on, vsync off):
+
+![Cube city — elevated 3/4 view over blocks and surrounding terrain](proc-world-stills/city.png)  
+Cube city — elevated 3/4 view over blocks and surrounding terrain.
+
+![Mountains — height bands and valley water](proc-world-stills/terrain.png)  
+Mountains — height bands and valley water.
+
+![Forest — instanced trees and rocks away from the city](proc-world-stills/forest.png)  
+Forest — instanced trees and rocks away from the city.
+
+![Low flight over water toward the cube city](proc-world-stills/water.png)  
+Low flight over water toward the cube city.
+
+Capture locally:
+
+```bash
+HYPERLITE_HEADLESS=1 .venv/bin/python python/examples/proc_world.py --preset play --headless --seed 42 --dump-png docs/proc-world-stills
+```
 
 ## What it stresses
 
