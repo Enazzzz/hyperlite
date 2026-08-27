@@ -421,6 +421,28 @@ inline float ScanTileMaxDepth(
 }
 
 /**
+ * True when every pixel center in a horizontal depth span fails vs tile Hi-Z.
+ *
+ * Screen depth is linear in x; span minimum is at one endpoint. Conservative for
+ * partial edge coverage (subset of covered pixels cannot be nearer than span min).
+ */
+inline bool DepthSpanBehindOccluder(
+	const float z_start,
+	const float dz_dx,
+	const int span_len,
+	const float tile_occluder_max) {
+	if (span_len <= 0) {
+		return false;
+	}
+	if (span_len == 1) {
+		return z_start > tile_occluder_max;
+	}
+	const float z_end = z_start + dz_dx * static_cast<float>(span_len - 1);
+	const float z_min = (dz_dx >= 0.0f) ? z_start : z_end;
+	return z_min > tile_occluder_max;
+}
+
+/**
  * Merge one written depth sample into the per-triangle Hi-Z write accumulator.
  */
 inline void AccumulateDepthWriteMax(float& write_max, const float z) {
@@ -760,7 +782,8 @@ inline void ExpandDirtyFromMask(
  * Returns true when at least one pixel was written.
  *
  * tile_occluder_max: farthest stored depth in this tile (1.0 = no occluder). When less than
- * far-plane, fully-covered rows whose minimum interpolated z exceeds it skip the pixel loop.
+ * far-plane, rows and SIMD blocks whose minimum interpolated z exceeds it skip fill work
+ * (partial coverage included); scalar pixels use the same Hi-Z rule before loading depth.
  * depth_write_max: when non-null, receives the farthest window depth actually written.
  */
 inline bool RasterScreenTriTile(
@@ -900,17 +923,13 @@ inline bool RasterScreenTriTile(
 		constexpr int kBlock = 4;
 #endif
 		for (int y = iy0; y < iy1; ++y) {
-			if (tile_depth_reject && box_fully_covered) {
-				const float z_end =
-					z_win_row + dz_win_dx * static_cast<float>(ix1 - ix0 - 1);
-				const float z_row_min = (dz_win_dx >= 0.0f) ? z_win_row : z_end;
-				if (z_row_min > tile_occluder_max) {
-					w0_row += e0.b;
-					w1_row += e1.b;
-					w2_row += e2.b;
-					z_win_row += dz_win_dy;
-					continue;
-				}
+			if (tile_depth_reject &&
+				DepthSpanBehindOccluder(z_win_row, dz_win_dx, ix1 - ix0, tile_occluder_max)) {
+				w0_row += e0.b;
+				w1_row += e1.b;
+				w2_row += e2.b;
+				z_win_row += dz_win_dy;
+				continue;
 			}
 			float w0 = w0_row;
 			float w1 = w1_row;
@@ -924,6 +943,11 @@ inline bool RasterScreenTriTile(
 			if (box_fully_covered) {
 				// Interior tile: depth + color only (no edge compares).
 				for (; x + kBlock <= ix1; x += kBlock) {
+					if (tile_depth_reject &&
+						DepthSpanBehindOccluder(z_win, dz_win_dx, kBlock, tile_occluder_max)) {
+						z_win += dz_win_dx * static_cast<float>(kBlock);
+						continue;
+					}
 #if defined(__AVX2__)
 					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
 					int written = 0xFF;
@@ -970,6 +994,14 @@ inline bool RasterScreenTriTile(
 				}
 			} else {
 				for (; x + kBlock <= ix1; x += kBlock) {
+					if (tile_depth_reject &&
+						DepthSpanBehindOccluder(z_win, dz_win_dx, kBlock, tile_occluder_max)) {
+						w0 += e0.a * static_cast<float>(kBlock);
+						w1 += e1.a * static_cast<float>(kBlock);
+						w2 += e2.a * static_cast<float>(kBlock);
+						z_win += dz_win_dx * static_cast<float>(kBlock);
+						continue;
+					}
 #if defined(__AVX2__)
 					const __m256 w0v = _mm256_add_ps(_mm256_set1_ps(w0), a0_lane);
 					const __m256 w1v = _mm256_add_ps(_mm256_set1_ps(w1), a1_lane);
@@ -1040,16 +1072,18 @@ inline bool RasterScreenTriTile(
 						InsideHalfEdge(w2, e2.top_left));
 				if (cover) {
 					if (has_depth) {
-						float& slot = row_depth[x];
-						if (z_win <= slot) {
-							slot = z_win;
-							row_dst[x] = flat_packed;
-							AccumulateDepthWriteMax(write_max, z_win);
-							touched = true;
-							dirty_x0 = std::min(dirty_x0, x);
-							dirty_y0 = std::min(dirty_y0, y);
-							dirty_x1 = std::max(dirty_x1, x);
-							dirty_y1 = std::max(dirty_y1, y);
+						if (!(tile_depth_reject && z_win > tile_occluder_max)) {
+							float& slot = row_depth[x];
+							if (z_win <= slot) {
+								slot = z_win;
+								row_dst[x] = flat_packed;
+								AccumulateDepthWriteMax(write_max, z_win);
+								touched = true;
+								dirty_x0 = std::min(dirty_x0, x);
+								dirty_y0 = std::min(dirty_y0, y);
+								dirty_x1 = std::max(dirty_x1, x);
+								dirty_y1 = std::max(dirty_y1, y);
+							}
 						}
 					} else {
 						row_dst[x] = flat_packed;
@@ -1095,20 +1129,16 @@ inline bool RasterScreenTriTile(
 		float vw_row = b0_row * vw0 + b1_row * vw1 + b2_row * vw2;
 
 		for (int y = iy0; y < iy1; ++y) {
-			if (tile_depth_reject && box_fully_covered) {
-				const float z_end =
-					z_win_row + dz_win_dx * static_cast<float>(ix1 - ix0 - 1);
-				const float z_row_min = (dz_win_dx >= 0.0f) ? z_win_row : z_end;
-				if (z_row_min > tile_occluder_max) {
-					w0_row += e0.b;
-					w1_row += e1.b;
-					w2_row += e2.b;
-					z_win_row += dz_win_dy;
-					iw_row += diw_dy;
-					uw_row += duw_dy;
-					vw_row += dvw_dy;
-					continue;
-				}
+			if (tile_depth_reject &&
+				DepthSpanBehindOccluder(z_win_row, dz_win_dx, ix1 - ix0, tile_occluder_max)) {
+				w0_row += e0.b;
+				w1_row += e1.b;
+				w2_row += e2.b;
+				z_win_row += dz_win_dy;
+				iw_row += diw_dy;
+				uw_row += duw_dy;
+				vw_row += dvw_dy;
+				continue;
 			}
 			float w0 = w0_row;
 			float w1 = w1_row;
@@ -1132,7 +1162,9 @@ inline bool RasterScreenTriTile(
 						const bool opaque = sa == 255U;
 						bool pass = true;
 						if (has_depth) {
-							if (opaque) {
+							if (tile_depth_reject && z_win > tile_occluder_max) {
+								pass = false;
+							} else if (opaque) {
 								float& slot = row_depth[x];
 								if (z_win <= slot) {
 									slot = z_win;
