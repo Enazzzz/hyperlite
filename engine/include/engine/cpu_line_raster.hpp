@@ -91,29 +91,54 @@ enum ClipCode : int {
 };
 
 /**
- * Compute Cohen-Sutherland outcode for one endpoint.
+ * Cohen-Sutherland outcode for one endpoint against an exclusive-max rectangle.
+ *
+ * xmax / ymax are exclusive (same convention as framebuffer width / height).
  */
-inline int ComputeClipCode(const int x, const int y, const int width, const int height) {
+inline int ComputeClipCodeRect(
+	const int x,
+	const int y,
+	const int xmin,
+	const int ymin,
+	const int xmax,
+	const int ymax) {
 	int code = kInside;
-	if (x < 0) {
+	if (x < xmin) {
 		code |= kLeft;
-	} else if (x >= width) {
+	} else if (x >= xmax) {
 		code |= kRight;
 	}
-	if (y < 0) {
+	if (y < ymin) {
 		code |= kTop;
-	} else if (y >= height) {
+	} else if (y >= ymax) {
 		code |= kBottom;
 	}
 	return code;
 }
 
 /**
- * Clip line to framebuffer bounds so the inner raster loop skips bounds checks.
+ * Compute Cohen-Sutherland outcode for one endpoint against the framebuffer.
  */
-inline bool ClipLineToFrame(int& x0, int& y0, int& x1, int& y1, const int width, const int height) {
-	int out0 = ComputeClipCode(x0, y0, width, height);
-	int out1 = ComputeClipCode(x1, y1, width, height);
+inline int ComputeClipCode(const int x, const int y, const int width, const int height) {
+	return ComputeClipCodeRect(x, y, 0, 0, width, height);
+}
+
+/**
+ * Clip line to an exclusive-max rectangle so each tile owns its pixels without overlap.
+ *
+ * Used for framebuffer clip and for 64×64 tile scissors (depth-on OpenMP).
+ */
+inline bool ClipLineToRect(
+	int& x0,
+	int& y0,
+	int& x1,
+	int& y1,
+	const int xmin,
+	const int ymin,
+	const int xmax,
+	const int ymax) {
+	int out0 = ComputeClipCodeRect(x0, y0, xmin, ymin, xmax, ymax);
+	int out1 = ComputeClipCodeRect(x1, y1, xmin, ymin, xmax, ymax);
 
 	while (true) {
 		if ((out0 | out1) == 0) {
@@ -128,29 +153,36 @@ inline bool ClipLineToFrame(int& x0, int& y0, int& x1, int& y1, const int width,
 		int y = 0;
 
 		if ((out & kTop) != 0) {
-			y = 0;
+			y = ymin;
 			x = x0 + (x1 - x0) * (y - y0) / (y1 - y0);
 		} else if ((out & kBottom) != 0) {
-			y = height - 1;
+			y = ymax - 1;
 			x = x0 + (x1 - x0) * (y - y0) / (y1 - y0);
 		} else if ((out & kRight) != 0) {
-			x = width - 1;
+			x = xmax - 1;
 			y = y0 + (y1 - y0) * (x - x0) / (x1 - x0);
 		} else {
-			x = 0;
+			x = xmin;
 			y = y0 + (y1 - y0) * (x - x0) / (x1 - x0);
 		}
 
 		if (out == out0) {
 			x0 = x;
 			y0 = y;
-			out0 = ComputeClipCode(x0, y0, width, height);
+			out0 = ComputeClipCodeRect(x0, y0, xmin, ymin, xmax, ymax);
 		} else {
 			x1 = x;
 			y1 = y;
-			out1 = ComputeClipCode(x1, y1, width, height);
+			out1 = ComputeClipCodeRect(x1, y1, xmin, ymin, xmax, ymax);
 		}
 	}
+}
+
+/**
+ * Clip line to framebuffer bounds so the inner raster loop skips bounds checks.
+ */
+inline bool ClipLineToFrame(int& x0, int& y0, int& x1, int& y1, const int width, const int height) {
+	return ClipLineToRect(x0, y0, x1, y1, 0, 0, width, height);
 }
 
 /**

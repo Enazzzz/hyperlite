@@ -1,7 +1,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "engine/engine.hpp"
@@ -68,9 +70,12 @@ void MulMat4(const float* a, const float* b, float* out) {
 }
 
 /**
- * Fill world-space segments for a dense wireframe grid in front of the camera.
+ * Fill world-space segments: short diagonals (default) or long spans (multi-tile after project).
+ *
+ * short: ~few tens of pixels after project (existing wireframe grid).
+ * long:  ~hundreds of pixels / multiple 64×64 tiles — exercises tiled depth OpenMP.
  */
-void FillWorldSegments(std::vector<float>& segments, const int frame) {
+void FillWorldSegments(std::vector<float>& segments, const int frame, const bool long_segs) {
 	const std::size_t line_count = segments.size() / 6U;
 	for (std::size_t i = 0; i < line_count; ++i) {
 		const int slot = static_cast<int>(i);
@@ -78,9 +83,12 @@ void FillWorldSegments(std::vector<float>& segments, const int frame) {
 		const float x0 = -1.5f + static_cast<float>(slot % 50) * 0.06f;
 		const float y0 = -1.0f + static_cast<float>((slot / 50) % 40) * 0.05f;
 		const float z0 = -0.2f - phase;
-		const float x1 = x0 + 0.08f;
-		const float y1 = y0 + 0.05f;
-		const float z1 = z0 - 0.1f;
+		const float dx = long_segs ? 1.4f : 0.08f;
+		const float dy = long_segs ? 0.9f : 0.05f;
+		const float dz = long_segs ? -0.4f : -0.1f;
+		const float x1 = x0 + dx;
+		const float y1 = y0 + dy;
+		const float z1 = z0 + dz;
 		const std::size_t base = i * 6U;
 		segments[base + 0U] = x0;
 		segments[base + 1U] = y0;
@@ -95,8 +103,12 @@ void FillWorldSegments(std::vector<float>& segments, const int frame) {
 
 /**
  * Benchmark TickLines3d (10k world segments, perspective camera, depth on, 1280x720).
+ *
+ * Pass "long" as argv[1] for multi-tile segments; default is the short-diagonal workload.
  */
-int main() {
+int main(int argc, char** argv) {
+	const bool long_segs = argc > 1 && std::strcmp(argv[1], "long") == 0;
+
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Line Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
 	engine.EnableDepth(true);
@@ -115,11 +127,11 @@ int main() {
 	constexpr std::uint32_t line_packed = hyperlite::PackColor({0, 255, 80, 255});
 
 	std::vector<float> segments(lines_per_frame * 6U);
-	FillWorldSegments(segments, 0);
+	FillWorldSegments(segments, 0, long_segs);
 
 	const auto t0 = std::chrono::high_resolution_clock::now();
 	for (int frame = 0; frame < frame_iterations; ++frame) {
-		FillWorldSegments(segments, frame);
+		FillWorldSegments(segments, frame, long_segs);
 		engine.TickLines3d(
 			clear_packed,
 			segments.data(),
@@ -137,6 +149,7 @@ int main() {
 	std::cout << "lines_per_frame=" << lines_per_frame << '\n';
 	std::cout << "resolution=1280x720\n";
 	std::cout << "depth=on\n";
+	std::cout << "workload=" << (long_segs ? "long" : "short") << '\n';
 	std::cout << "total_ms=" << ms << '\n';
 	std::cout << "lines_per_second=" << lines_per_second << '\n';
 	return 0;

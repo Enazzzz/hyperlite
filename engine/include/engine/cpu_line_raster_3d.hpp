@@ -769,13 +769,528 @@ inline void DrawScreenSegment(
 	}
 }
 
+/**
+ * Screen-space segment after clip/project (ready to raster or bin into tiles).
+ */
+struct ProjectedSeg {
+	int x0 = 0;
+	int y0 = 0;
+	int x1 = 0;
+	int y1 = 0;
+	float depth0 = 0.0f;
+	float depth1 = 0.0f;
+	float inv_w0 = 1.0f;
+	float inv_w1 = 1.0f;
+};
+
+/**
+ * Per-draw scratch for depth-on 3D line project / tile bins (reused across draws).
+ *
+ * Process-static like MeshDrawScratch — not thread_local (TLS breaks non-PIC → Python .so).
+ * Emit + bin on one thread; OpenMP workers only read bins afterward.
+ */
+struct Line3dDrawScratch {
+	/** Projected segments for the current batch. */
+	std::vector<ProjectedSeg> segs{};
+	/** 64×64 tile → projected segment index lists (capacity retained). */
+	std::vector<std::vector<std::uint32_t>> bins{};
+};
+
+/**
+ * Process-wide 3D line scratch (project + bin are single-threaded before OpenMP fill).
+ */
+inline Line3dDrawScratch& GetLine3dDrawScratch() {
+	static Line3dDrawScratch scratch;
+	return scratch;
+}
+
+/**
+ * Minimum segment count before depth-on tiled OpenMP is worth the bin/fork tax.
+ */
+inline constexpr std::size_t kDepthTileParallelThreshold = 384U;
+
+/**
+ * Minimum mean Chebyshev screen span (max(|dx|,|dy|)) before parallel depth raster beats serial.
+ *
+ * Short-diagonal default bench (~14 px mean) loses to bin/fork overhead; long multi-row spans
+ * (~216 px) win with 64px-tall full-width row strips.
+ */
+inline constexpr int kMinMeanSpanForTiles = 48;
+
+/**
+ * Project a clipped clip-space segment into ProjectedSeg; returns false if degenerate.
+ */
+inline bool TryProjectClipSegment(
+	const ClipVert& a,
+	const ClipVert& b,
+	const int width,
+	const int height,
+	ProjectedSeg& out) {
+	float px0 = 0.0f;
+	float py0 = 0.0f;
+	float d0 = 0.0f;
+	float iw0 = 1.0f;
+	float px1 = 0.0f;
+	float py1 = 0.0f;
+	float d1 = 0.0f;
+	float iw1 = 1.0f;
+	if (!ProjectToPixels(a, width, height, px0, py0, d0, iw0) ||
+		!ProjectToPixels(b, width, height, px1, py1, d1, iw1)) {
+		return false;
+	}
+	out.x0 = static_cast<int>(std::lround(px0));
+	out.y0 = static_cast<int>(std::lround(py0));
+	out.x1 = static_cast<int>(std::lround(px1));
+	out.y1 = static_cast<int>(std::lround(py1));
+	if (out.x0 == out.x1 && out.y0 == out.y1) {
+		return false;
+	}
+	out.depth0 = d0;
+	out.depth1 = d1;
+	out.inv_w0 = iw0;
+	out.inv_w1 = iw1;
+	return true;
+}
+
+/**
+ * Clip + project one world segment (from pre-transformed clip) into the projected list.
+ */
+inline void EmitProjectedFromClip(
+	ClipVert a,
+	ClipVert b,
+	const int out_a,
+	const int out_b,
+	const int width,
+	const int height,
+	std::vector<ProjectedSeg>& segs) {
+	if ((out_a & out_b) != 0) {
+		return;
+	}
+	if ((out_a | out_b) != 0) {
+		if (!ClipLineHomogeneous(a, b)) {
+			return;
+		}
+	}
+	ProjectedSeg seg{};
+	if (TryProjectClipSegment(a, b, width, height, seg)) {
+		segs.push_back(seg);
+	}
+}
+
+/**
+ * Draw one projected segment (optional width) with the existing H/V + Bresenham fill.
+ */
+inline void DrawProjectedSeg(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int width,
+	const int height,
+	const ProjectedSeg& seg,
+	const std::uint32_t packed_color,
+	const int line_width,
+	PixelBounds& bounds) {
+	const int width_clamped = std::max(1, std::min(line_width, 64));
+	if (width_clamped == 1) {
+		DrawThinLineDepth(
+			dst,
+			depth,
+			width,
+			height,
+			seg.x0,
+			seg.y0,
+			seg.x1,
+			seg.y1,
+			seg.depth0,
+			seg.depth1,
+			seg.inv_w0,
+			seg.inv_w1,
+			packed_color,
+			bounds);
+		return;
+	}
+	const int half = width_clamped / 2;
+	const int adx = std::abs(seg.x1 - seg.x0);
+	const int ady = std::abs(seg.y1 - seg.y0);
+	for (int offset = -half; offset <= half; ++offset) {
+		if (adx >= ady) {
+			DrawThinLineDepth(
+				dst,
+				depth,
+				width,
+				height,
+				seg.x0,
+				seg.y0 + offset,
+				seg.x1,
+				seg.y1 + offset,
+				seg.depth0,
+				seg.depth1,
+				seg.inv_w0,
+				seg.inv_w1,
+				packed_color,
+				bounds);
+		} else {
+			DrawThinLineDepth(
+				dst,
+				depth,
+				width,
+				height,
+				seg.x0 + offset,
+				seg.y0,
+				seg.x1 + offset,
+				seg.y1,
+				seg.depth0,
+				seg.depth1,
+				seg.inv_w0,
+				seg.inv_w1,
+				packed_color,
+				bounds);
+		}
+	}
+}
+
+/**
+ * Clip one thin segment to a tile rect (exclusive max) with depth/inv_w lerp, then raster.
+ *
+ * Tile owns pixels → OpenMP over tiles cannot race the depth buffer.
+ */
+inline void DrawThinLineDepthInTile(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int width,
+	const int height,
+	int x0,
+	int y0,
+	int x1,
+	int y1,
+	float depth0,
+	float depth1,
+	float inv_w0,
+	float inv_w1,
+	const std::uint32_t packed_color,
+	const int tile_x0,
+	const int tile_y0,
+	const int tile_x1,
+	const int tile_y1,
+	PixelBounds& bounds) {
+	if (std::max(x0, x1) < tile_x0 || std::min(x0, x1) >= tile_x1 ||
+		std::max(y0, y1) < tile_y0 || std::min(y0, y1) >= tile_y1) {
+		return;
+	}
+
+	const float fx0 = static_cast<float>(x0);
+	const float fy0 = static_cast<float>(y0);
+	const float fx1 = static_cast<float>(x1);
+	const float fy1 = static_cast<float>(y1);
+	int ix0 = x0;
+	int iy0 = y0;
+	int ix1 = x1;
+	int iy1 = y1;
+	if (!detail::ClipLineToRect(ix0, iy0, ix1, iy1, tile_x0, tile_y0, tile_x1, tile_y1)) {
+		return;
+	}
+	const float len2 = (fx1 - fx0) * (fx1 - fx0) + (fy1 - fy0) * (fy1 - fy0);
+	if (len2 > 1e-6f) {
+		const float t0 =
+			((static_cast<float>(ix0) - fx0) * (fx1 - fx0) + (static_cast<float>(iy0) - fy0) * (fy1 - fy0)) / len2;
+		const float t1 =
+			((static_cast<float>(ix1) - fx0) * (fx1 - fx0) + (static_cast<float>(iy1) - fy0) * (fy1 - fy0)) / len2;
+		const float d0 = depth0;
+		const float d1 = depth1;
+		const float iw0 = inv_w0;
+		const float iw1 = inv_w1;
+		depth0 = d0 + (d1 - d0) * t0;
+		depth1 = d0 + (d1 - d0) * t1;
+		inv_w0 = iw0 + (iw1 - iw0) * t0;
+		inv_w1 = iw0 + (iw1 - iw0) * t1;
+	}
+	DrawThinLineDepth(
+		dst, depth, width, height, ix0, iy0, ix1, iy1, depth0, depth1, inv_w0, inv_w1, packed_color, bounds);
+}
+
+/**
+ * Raster one projected segment clipped to a single tile (width offsets included).
+ */
+inline void DrawProjectedSegInTile(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int width,
+	const int height,
+	const ProjectedSeg& seg,
+	const std::uint32_t packed_color,
+	const int line_width,
+	const int tile_x0,
+	const int tile_y0,
+	const int tile_x1,
+	const int tile_y1,
+	PixelBounds& bounds) {
+	const int width_clamped = std::max(1, std::min(line_width, 64));
+	if (width_clamped == 1) {
+		DrawThinLineDepthInTile(
+			dst,
+			depth,
+			width,
+			height,
+			seg.x0,
+			seg.y0,
+			seg.x1,
+			seg.y1,
+			seg.depth0,
+			seg.depth1,
+			seg.inv_w0,
+			seg.inv_w1,
+			packed_color,
+			tile_x0,
+			tile_y0,
+			tile_x1,
+			tile_y1,
+			bounds);
+		return;
+	}
+	const int half = width_clamped / 2;
+	const int adx = std::abs(seg.x1 - seg.x0);
+	const int ady = std::abs(seg.y1 - seg.y0);
+	for (int offset = -half; offset <= half; ++offset) {
+		if (adx >= ady) {
+			DrawThinLineDepthInTile(
+				dst,
+				depth,
+				width,
+				height,
+				seg.x0,
+				seg.y0 + offset,
+				seg.x1,
+				seg.y1 + offset,
+				seg.depth0,
+				seg.depth1,
+				seg.inv_w0,
+				seg.inv_w1,
+				packed_color,
+				tile_x0,
+				tile_y0,
+				tile_x1,
+				tile_y1,
+				bounds);
+		} else {
+			DrawThinLineDepthInTile(
+				dst,
+				depth,
+				width,
+				height,
+				seg.x0 + offset,
+				seg.y0,
+				seg.x1 + offset,
+				seg.y1,
+				seg.depth0,
+				seg.depth1,
+				seg.inv_w0,
+				seg.inv_w1,
+				packed_color,
+				tile_x0,
+				tile_y0,
+				tile_x1,
+				tile_y1,
+				bounds);
+		}
+	}
+}
+
+/**
+ * Parallel depth-on raster: bin into 64px-tall full-width row strips, OpenMP over strips.
+ *
+ * Full 64×64 AABB bins were a measured loss vs serial on both short and long wireframes
+ * (too many Cohen–Sutherland clip restarts). Row strips still match dirty-tile height and
+ * guarantee exclusive pixel ownership (no depth races). Hybrid: serial when the batch is
+ * small or mean screen span is short.
+ *
+ * Reuses Line3dDrawScratch bins (clear, keep capacity).
+ */
+inline void RasterProjectedSegsDepth(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const std::vector<ProjectedSeg>& segs,
+	const std::uint32_t line_color,
+	const int line_width) {
+	if (segs.empty()) {
+		return;
+	}
+	auto* dst = reinterpret_cast<std::uint32_t*>(framebuffer.Data());
+	const int width = framebuffer.Width();
+	const int height = framebuffer.Height();
+	PixelBounds global_bounds{};
+
+	std::uint64_t span_sum = 0U;
+	for (const ProjectedSeg& seg : segs) {
+		const int adx = std::abs(seg.x1 - seg.x0);
+		const int ady = std::abs(seg.y1 - seg.y0);
+		span_sum += static_cast<std::uint64_t>(std::max(adx, ady));
+	}
+	const int mean_span = static_cast<int>(span_sum / static_cast<std::uint64_t>(segs.size()));
+
+	constexpr int kRowTile = FrameBuffer::kDirtyTileSize;
+	const int strip_count = std::max(1, (height + kRowTile - 1) / kRowTile);
+
+#if defined(_OPENMP)
+	InitOpenMpOnce();
+	const bool use_parallel =
+		depth != nullptr && depth->Allocated() && segs.size() >= kDepthTileParallelThreshold &&
+		mean_span >= kMinMeanSpanForTiles && omp_get_max_threads() > 1;
+#else
+	(void)mean_span;
+	const bool use_parallel = false;
+#endif
+
+	if (!use_parallel) {
+		for (const ProjectedSeg& seg : segs) {
+			DrawProjectedSeg(dst, depth, width, height, seg, line_color, line_width, global_bounds);
+		}
+		if (global_bounds.valid) {
+			framebuffer.NoteDirtyRect(
+				global_bounds.min_x, global_bounds.min_y, global_bounds.max_x + 1, global_bounds.max_y + 1);
+		}
+		framebuffer.FinalizeDirtyTiles();
+		return;
+	}
+
+	const int half = std::max(0, std::min(line_width, 64) / 2);
+	Line3dDrawScratch& scratch = GetLine3dDrawScratch();
+	auto& bins = scratch.bins;
+	if (static_cast<int>(bins.size()) != strip_count) {
+		bins.assign(static_cast<std::size_t>(strip_count), {});
+	} else {
+		for (auto& bin : bins) {
+			bin.clear();
+		}
+	}
+
+	// Bin by Y overlap into 64px-tall strips spanning the full framebuffer width.
+	for (std::uint32_t si = 0U; si < static_cast<std::uint32_t>(segs.size()); ++si) {
+		const ProjectedSeg& seg = segs[si];
+		const int min_y = std::min(seg.y0, seg.y1) - half;
+		const int max_y = std::max(seg.y0, seg.y1) + half;
+		int sy0 = min_y / kRowTile;
+		int sy1 = max_y / kRowTile;
+		if (min_y < 0) {
+			sy0 = (min_y - kRowTile + 1) / kRowTile;
+		}
+		sy0 = std::max(0, sy0);
+		sy1 = std::min(strip_count - 1, sy1);
+		if (sy0 > sy1) {
+			continue;
+		}
+		for (int s = sy0; s <= sy1; ++s) {
+			bins[static_cast<std::size_t>(s)].push_back(si);
+		}
+	}
+
+#if defined(_OPENMP)
+	const int max_threads = std::max(1, omp_get_max_threads());
+	std::vector<PixelBounds> thread_bounds(static_cast<std::size_t>(max_threads));
+	#pragma omp parallel for schedule(dynamic)
+	for (int s = 0; s < strip_count; ++s) {
+		const auto& list = bins[static_cast<std::size_t>(s)];
+		if (list.empty()) {
+			continue;
+		}
+		const int tid = omp_get_thread_num();
+		PixelBounds& local = thread_bounds[static_cast<std::size_t>(tid)];
+		const int y0 = s * kRowTile;
+		const int y1 = std::min(y0 + kRowTile, height);
+		for (const std::uint32_t idx : list) {
+			DrawProjectedSegInTile(
+				dst, depth, width, height, segs[idx], line_color, line_width, 0, y0, width, y1, local);
+		}
+	}
+	MergeThreadBounds(global_bounds, thread_bounds);
+#endif
+
+	if (global_bounds.valid) {
+		framebuffer.NoteDirtyRect(
+			global_bounds.min_x, global_bounds.min_y, global_bounds.max_x + 1, global_bounds.max_y + 1);
+	}
+	framebuffer.FinalizeDirtyTiles();
+}
+
+/**
+ * Transform + clip + project all world segments into scratch.segs (AVX2 MVP when available).
+ */
+inline void EmitProjectedWorldSegments(
+	const float* view_proj16,
+	const float* segments,
+	const std::size_t line_count,
+	const int width,
+	const int height,
+	std::vector<ProjectedSeg>& segs) {
+	segs.clear();
+	segs.reserve(line_count);
+
+#if defined(__AVX2__) && defined(__FMA__)
+	std::size_t line = 0U;
+	alignas(32) float cx[8];
+	alignas(32) float cy[8];
+	alignas(32) float cz[8];
+	alignas(32) float cw[8];
+	for (; line + 4U <= line_count; line += 4U) {
+		const float* s0 = segments + line * 6U;
+		const float* s1 = segments + (line + 1U) * 6U;
+		const float* s2 = segments + (line + 2U) * 6U;
+		const float* s3 = segments + (line + 3U) * 6U;
+		TransformEightPositionsAvx2(
+			view_proj16,
+			s0 + 0,
+			s0 + 3,
+			s1 + 0,
+			s1 + 3,
+			s2 + 0,
+			s2 + 3,
+			s3 + 0,
+			s3 + 3,
+			cx,
+			cy,
+			cz,
+			cw);
+		for (int lane = 0; lane < 4; ++lane) {
+			const int i0 = lane * 2;
+			const int i1 = i0 + 1;
+			ClipVert a{};
+			ClipVert b{};
+			a.x = cx[i0];
+			a.y = cy[i0];
+			a.z = cz[i0];
+			a.w = cw[i0];
+			b.x = cx[i1];
+			b.y = cy[i1];
+			b.z = cz[i1];
+			b.w = cw[i1];
+			EmitProjectedFromClip(
+				a, b, ComputeClipOutcode(a), ComputeClipOutcode(b), width, height, segs);
+		}
+	}
+	for (; line < line_count; ++line) {
+		const std::size_t base = line * 6U;
+		ClipVert a = MulViewProj(view_proj16, segments[base + 0U], segments[base + 1U], segments[base + 2U]);
+		ClipVert b = MulViewProj(view_proj16, segments[base + 3U], segments[base + 4U], segments[base + 5U]);
+		EmitProjectedFromClip(
+			a, b, ComputeClipOutcode(a), ComputeClipOutcode(b), width, height, segs);
+	}
+#else
+	for (std::size_t line = 0U; line < line_count; ++line) {
+		const std::size_t base = line * 6U;
+		ClipVert a = MulViewProj(view_proj16, segments[base + 0U], segments[base + 1U], segments[base + 2U]);
+		ClipVert b = MulViewProj(view_proj16, segments[base + 3U], segments[base + 4U], segments[base + 5U]);
+		EmitProjectedFromClip(
+			a, b, ComputeClipOutcode(a), ComputeClipOutcode(b), width, height, segs);
+	}
+#endif
+}
+
 } // namespace detail3d
 
 /**
  * Raster world-space float segments [x0,y0,z0,x1,y1,z1,...] with view-proj + optional depth.
  *
- * When depth is non-null, OpenMP is disabled to avoid racy depth writes.
- * When depth is null (2D-style color only), OpenMP over segments matches the 2D line path.
+ * Depth-off: OpenMP over segments (same race rule as before).
+ * Depth-on: project once, then OpenMP over 64×64 tiles (each tile owns color+depth) when the
+ * batch is large enough; otherwise serial projected raster (avoids bin tax on tiny batches).
  */
 inline void RasterLines3dWorld(
 	FrameBuffer& framebuffer,
@@ -793,11 +1308,19 @@ inline void RasterLines3dWorld(
 	const int height = framebuffer.Height();
 	PixelBounds bounds{};
 
+	// Depth-on: tile-parallel path (no racy depth writes).
+	if (depth != nullptr && depth->Allocated()) {
+		detail3d::Line3dDrawScratch& scratch = detail3d::GetLine3dDrawScratch();
+		detail3d::EmitProjectedWorldSegments(
+			view_proj16, segments, line_count, width, height, scratch.segs);
+		detail3d::RasterProjectedSegsDepth(framebuffer, depth, scratch.segs, line_color, line_width);
+		return;
+	}
+
 #if defined(_OPENMP)
 	InitOpenMpOnce();
 	constexpr std::size_t kParallelLineThreshold = 384U;
-	const bool parallel =
-		depth == nullptr && line_count >= kParallelLineThreshold && omp_get_max_threads() > 1;
+	const bool parallel = line_count >= kParallelLineThreshold && omp_get_max_threads() > 1;
 	if (parallel) {
 		const int max_threads = omp_get_max_threads();
 		std::vector<PixelBounds> thread_bounds(static_cast<std::size_t>(max_threads));
@@ -826,7 +1349,6 @@ inline void RasterLines3dWorld(
 #endif
 	{
 #if defined(__AVX2__) && defined(__FMA__)
-		// Batch MVP for 4 segments (8 endpoints) when AVX2+FMA is available.
 		std::size_t line = 0U;
 		alignas(32) float cx[8];
 		alignas(32) float cy[8];
@@ -859,7 +1381,7 @@ inline void RasterLines3dWorld(
 				b.w = cw[i1];
 				detail3d::DrawWorldSegmentFromClip(
 					dst,
-					depth,
+					nullptr,
 					width,
 					height,
 					a,
@@ -875,7 +1397,7 @@ inline void RasterLines3dWorld(
 			const std::size_t base = line * 6U;
 			detail3d::DrawWorldSegment(
 				dst,
-				depth,
+				nullptr,
 				width,
 				height,
 				view_proj16,
@@ -894,7 +1416,7 @@ inline void RasterLines3dWorld(
 			const std::size_t base = line * 6U;
 			detail3d::DrawWorldSegment(
 				dst,
-				depth,
+				nullptr,
 				width,
 				height,
 				view_proj16,
@@ -940,6 +1462,8 @@ inline void ClearAndRasterLines3dWorld(
 
 /**
  * Raster screen-space escape-hatch segments: pixel xy + NDC z [-1,1] per endpoint.
+ *
+ * Depth-on uses the same 64×64 tile OpenMP path as world lines (no depth races).
  */
 inline void RasterLines3dScreen(
 	FrameBuffer& framebuffer,
@@ -951,6 +1475,32 @@ inline void RasterLines3dScreen(
 	if (line_count == 0U || segments == nullptr) {
 		return;
 	}
+
+	if (depth != nullptr && depth->Allocated()) {
+		detail3d::Line3dDrawScratch& scratch = detail3d::GetLine3dDrawScratch();
+		auto& segs = scratch.segs;
+		segs.clear();
+		segs.reserve(line_count);
+		for (std::size_t line = 0U; line < line_count; ++line) {
+			const std::size_t base = line * 6U;
+			detail3d::ProjectedSeg seg{};
+			seg.x0 = static_cast<int>(std::lround(segments[base + 0U]));
+			seg.y0 = static_cast<int>(std::lround(segments[base + 1U]));
+			seg.x1 = static_cast<int>(std::lround(segments[base + 3U]));
+			seg.y1 = static_cast<int>(std::lround(segments[base + 4U]));
+			if (seg.x0 == seg.x1 && seg.y0 == seg.y1) {
+				continue;
+			}
+			seg.depth0 = segments[base + 2U];
+			seg.depth1 = segments[base + 5U];
+			seg.inv_w0 = 1.0f;
+			seg.inv_w1 = 1.0f;
+			segs.push_back(seg);
+		}
+		detail3d::RasterProjectedSegsDepth(framebuffer, depth, segs, line_color, line_width);
+		return;
+	}
+
 	auto* dst = reinterpret_cast<std::uint32_t*>(framebuffer.Data());
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
@@ -959,7 +1509,7 @@ inline void RasterLines3dScreen(
 		const std::size_t base = line * 6U;
 		detail3d::DrawScreenSegment(
 			dst,
-			depth,
+			nullptr,
 			width,
 			height,
 			segments[base + 0U],
