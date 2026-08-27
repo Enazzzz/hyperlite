@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "engine/engine.hpp"
@@ -126,11 +127,16 @@ void BuildGridMesh(
 } // namespace
 
 /**
- * Benchmark retained mesh draw (load once, draw N times) vs immediate TickTris3d.
+ * Benchmark retained mesh draw (load once, draw N times) — flat and textured.
  *
- * Mesh: ~5k tris (50×50 quads × 2). Drawn once per frame via TickMesh @ 1280×720 depth on.
+ * Mesh: 70×70 quads × 2 tris. Drawn once per frame via TickMesh / TickMeshTextured
+ * @ 1280×720 depth on. Pass argv[1]=="textured" to run the textured path only;
+ * otherwise run flat then textured and print both.
  */
-int main() {
+int main(int argc, char** argv) {
+	const bool textured_only = (argc > 1 && std::string(argv[1]) == "textured");
+	const bool flat_only = (argc > 1 && std::string(argv[1]) == "flat");
+
 	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite 3D Mesh Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
 	engine.EnableDepth(true);
@@ -156,6 +162,26 @@ int main() {
 		return 1;
 	}
 
+	// Opaque 64×64 checker atlas so textured sampling is non-trivial.
+	constexpr int atlas_w = 64;
+	constexpr int atlas_h = 64;
+	std::vector<std::uint8_t> atlas_px(static_cast<std::size_t>(atlas_w * atlas_h) * 4U);
+	for (int y = 0; y < atlas_h; ++y) {
+		for (int x = 0; x < atlas_w; ++x) {
+			const bool on = ((x / 8) + (y / 8)) % 2 == 0;
+			const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(atlas_w) + static_cast<std::size_t>(x)) * 4U;
+			atlas_px[i + 0U] = on ? 0 : 255;
+			atlas_px[i + 1U] = on ? 200 : 0;
+			atlas_px[i + 2U] = on ? 255 : 80;
+			atlas_px[i + 3U] = 255;
+		}
+	}
+	const int atlas = engine.LoadAtlas(atlas_px.data(), atlas_px.size(), atlas_w, atlas_h);
+	if (atlas < 0) {
+		std::cerr << "load_atlas failed\n";
+		return 1;
+	}
+
 	float model[16];
 	FillIdentity(model);
 
@@ -163,25 +189,49 @@ int main() {
 	constexpr std::uint32_t clear_packed = hyperlite::PackColor({8, 12, 20, 255});
 	constexpr std::uint32_t tri_packed = hyperlite::PackColor({0, 200, 255, 255});
 
-	const auto t0 = std::chrono::high_resolution_clock::now();
-	for (int frame = 0; frame < frame_iterations; ++frame) {
-		// Slight Z wobble so depth work is not entirely static.
-		model[14] = 0.001f * static_cast<float>(frame % 17);
-		engine.TickMesh(clear_packed, mesh, model, tri_packed);
+	auto run_flat = [&]() -> double {
+		FillIdentity(model);
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		for (int frame = 0; frame < frame_iterations; ++frame) {
+			model[14] = 0.001f * static_cast<float>(frame % 17);
+			engine.TickMesh(clear_packed, mesh, model, tri_packed);
+		}
+		const auto t1 = std::chrono::high_resolution_clock::now();
+		return ElapsedMs(t0, t1);
+	};
+
+	auto run_textured = [&]() -> double {
+		FillIdentity(model);
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		for (int frame = 0; frame < frame_iterations; ++frame) {
+			model[14] = 0.001f * static_cast<float>(frame % 17);
+			engine.TickMeshTextured(clear_packed, mesh, model, atlas);
+		}
+		const auto t1 = std::chrono::high_resolution_clock::now();
+		return ElapsedMs(t0, t1);
+	};
+
+	auto print_result = [&](const char* path, const double ms) {
+		const double tris = static_cast<double>(frame_iterations) * static_cast<double>(tris_per_draw);
+		const double tris_per_second = tris / (ms / 1000.0);
+		std::cout << "frames=" << frame_iterations << '\n';
+		std::cout << "tris_per_frame=" << tris_per_draw << '\n';
+		std::cout << "draws_per_frame=1\n";
+		std::cout << "resolution=1280x720\n";
+		std::cout << "depth=on\n";
+		std::cout << "path=" << path << '\n';
+		std::cout << "total_ms=" << ms << '\n';
+		std::cout << "tris_per_second=" << tris_per_second << '\n';
+	};
+
+	if (!textured_only) {
+		print_result("TickMesh", run_flat());
 	}
-	const auto t1 = std::chrono::high_resolution_clock::now();
-
-	const double ms = ElapsedMs(t0, t1);
-	const double tris = static_cast<double>(frame_iterations) * static_cast<double>(tris_per_draw);
-	const double tris_per_second = tris / (ms / 1000.0);
-
-	std::cout << "frames=" << frame_iterations << '\n';
-	std::cout << "tris_per_frame=" << tris_per_draw << '\n';
-	std::cout << "draws_per_frame=1\n";
-	std::cout << "resolution=1280x720\n";
-	std::cout << "depth=on\n";
-	std::cout << "path=TickMesh\n";
-	std::cout << "total_ms=" << ms << '\n';
-	std::cout << "tris_per_second=" << tris_per_second << '\n';
+	if (!flat_only) {
+		if (!textured_only) {
+			std::cout << "---\n";
+		}
+		print_result("TickMeshTextured", run_textured());
+	}
 	return 0;
 }

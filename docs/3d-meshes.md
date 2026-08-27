@@ -1,4 +1,4 @@
-# Retained meshes (Layer 2)
+# Retained meshes (Layer 2 / 2.1)
 
 Load a mesh once, draw it many times with a model matrix — the 3D analogue of `load_atlas` + `draw_sprite`. Uses the Layer 1 tiled triangle raster + depth + view-proj.
 
@@ -26,18 +26,35 @@ engine.tick()
 
 # Fused helper (optional)
 engine.tick_mesh(mesh, model16, 8, 12, 20, 255, 0, 200, 255, 255)
+
+# Layer 2.1 textured draw (UV 0..1 = full atlas)
+atlas = engine.load_atlas(rgba8, width, height)
+engine.draw_mesh_textured(mesh, model16, atlas)
+engine.tick_mesh_textured(mesh, model16, atlas, 8, 12, 20, 255)
 ```
 
-Invalid mesh handles are a **no-op** (no crash). Bad uploads raise / return failure from `load_mesh`.
+Invalid mesh / atlas handles are a **no-op** (no crash). Bad uploads raise / return failure from `load_mesh` / `load_atlas`.
 
-## What ships in v1
+## Texturing (Layer 2.1)
+
+| Rule | Behavior |
+|------|----------|
+| UV space | `u,v` in **0..1 over the full atlas** (not a sprite subrect) |
+| Filter | **Nearest** neighbor (pixel-art / immediate fast path) |
+| Wrap | **Clamp** to [0,1] |
+| Perspective | Interpolate `u/w`, `v/w`, `1/w` in screen space, then divide |
+| Alpha | `a==255` opaque + depth write; `a<255` src-over + no depth write; `a==0` skip |
+
+Flat-color `draw_mesh` ignores UVs and remains unchanged.
+
+## What ships
 
 | Feature | Status |
 |---------|--------|
 | `load_mesh` / `draw_mesh` / `tick_mesh` | Shipped |
 | Flat color per draw | Shipped |
-| UV storage (for later texturing) | Stored, unused |
-| `draw_mesh_textured` / atlas sampling | **Skipped** — follow-up Layer 2.1 |
+| UV storage | Shipped |
+| `draw_mesh_textured` / `tick_mesh_textured` | **Shipped (Layer 2.1)** |
 | glTF / scene graph / PBR | Out of scope |
 
 ## Mental model
@@ -46,10 +63,11 @@ Invalid mesh handles are a **no-op** (no crash). Bad uploads raise / return fail
 |----|------------|
 | `load_atlas` | `load_mesh` |
 | `draw_sprite(atlas, …)` | `draw_mesh(mesh, model, color)` |
+| atlas blit | `draw_mesh_textured(mesh, model, atlas)` |
 | Retained 2D command layer | **Not** the same — meshes are vertex/index buffers |
 
 ## See also
 
 - [3d-plan.md](3d-plan.md) — roadmap
-- [3d-mesh-bench.md](3d-mesh-bench.md) — throughput vs immediate `tris_3d`
+- [3d-mesh-bench.md](3d-mesh-bench.md) — throughput vs immediate `tris_3d` / textured
 - [3d-tri-bench.md](3d-tri-bench.md) — Layer 1 immediate triangles

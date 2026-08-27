@@ -29,13 +29,18 @@ enum ClipOut : int {
 };
 
 /**
- * Clip-space homogeneous point (x,y,z,w).
+ * Clip-space homogeneous point (x,y,z,w) with optional UV (carried through clip lerps).
+ *
+ * Flat-color paths leave u/v at 0. Textured paths set them before frustum clip so
+ * Sutherland–Hodgman edge splits keep perspective-ready attributes.
  */
 struct ClipVert {
 	float x = 0.0f;
 	float y = 0.0f;
 	float z = 0.0f;
 	float w = 1.0f;
+	float u = 0.0f;
+	float v = 0.0f;
 };
 
 /**
@@ -74,15 +79,17 @@ inline int ComputeClipOutcode(const ClipVert& v) {
 }
 
 /**
- * Lerp two clip-space vertices (homogeneous).
+ * Lerp two clip-space vertices (homogeneous), including UV attributes.
  */
 inline ClipVert LerpClip(const ClipVert& a, const ClipVert& b, const float t) {
-	const float u = 1.0f - t;
+	const float s = 1.0f - t;
 	ClipVert out{};
-	out.x = u * a.x + t * b.x;
-	out.y = u * a.y + t * b.y;
-	out.z = u * a.z + t * b.z;
-	out.w = u * a.w + t * b.w;
+	out.x = s * a.x + t * b.x;
+	out.y = s * a.y + t * b.y;
+	out.z = s * a.z + t * b.z;
+	out.w = s * a.w + t * b.w;
+	out.u = s * a.u + t * b.u;
+	out.v = s * a.v + t * b.v;
 	return out;
 }
 

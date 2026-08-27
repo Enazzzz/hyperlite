@@ -1303,6 +1303,72 @@ static PyObject* PyEngine_tick_mesh(PyEngineObject* self, PyObject* args) {
 }
 
 /**
+ * Draw a loaded mesh textured from an atlas (perspective-correct UV, nearest, clamp).
+ */
+static PyObject* PyEngine_draw_mesh_textured(PyEngineObject* self, PyObject* args) {
+	int mesh_id = 0;
+	PyObject* model_obj = nullptr;
+	int atlas_id = 0;
+	if (!PyArg_ParseTuple(args, "iOi", &mesh_id, &model_obj, &atlas_id)) {
+		return nullptr;
+	}
+	Py_buffer model_view{};
+	if (PyObject_GetBuffer(model_obj, &model_view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "model must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (model_view.len != static_cast<Py_ssize_t>(sizeof(float) * 16U)) {
+		PyBuffer_Release(&model_view);
+		PyErr_SetString(PyExc_ValueError, "model must be exactly 16 float32 values (column-major).");
+		return nullptr;
+	}
+	self->native_engine->DrawMeshTextured(
+		mesh_id,
+		reinterpret_cast<const float*>(model_view.buf),
+		atlas_id);
+	PyBuffer_Release(&model_view);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Fused poll + clear color/depth + draw_mesh_textured + present.
+ */
+static PyObject* PyEngine_tick_mesh_textured(PyEngineObject* self, PyObject* args) {
+	int mesh_id = 0;
+	PyObject* model_obj = nullptr;
+	int atlas_id = 0;
+	int clear_r = 0;
+	int clear_g = 0;
+	int clear_b = 0;
+	int clear_a = 255;
+	if (!PyArg_ParseTuple(args, "iOiiiii", &mesh_id, &model_obj, &atlas_id, &clear_r, &clear_g, &clear_b, &clear_a)) {
+		return nullptr;
+	}
+	Py_buffer model_view{};
+	if (PyObject_GetBuffer(model_obj, &model_view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "model must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (model_view.len != static_cast<Py_ssize_t>(sizeof(float) * 16U)) {
+		PyBuffer_Release(&model_view);
+		PyErr_SetString(PyExc_ValueError, "model must be exactly 16 float32 values (column-major).");
+		return nullptr;
+	}
+	const Color clear_color{
+		static_cast<std::uint8_t>(clear_r),
+		static_cast<std::uint8_t>(clear_g),
+		static_cast<std::uint8_t>(clear_b),
+		static_cast<std::uint8_t>(clear_a)};
+	const int draw_count = self->native_engine->TickMeshTextured(
+		hyperlite::PackColor(clear_color),
+		mesh_id,
+		reinterpret_cast<const float*>(model_view.buf),
+		atlas_id);
+	PyBuffer_Release(&model_view);
+	return PyLong_FromLong(draw_count);
+}
+
+/**
  * Queue many line commands from one int32 segment buffer.
  */
 static PyObject* PyEngine_lines_bulk(PyEngineObject* self, PyObject* args) {
@@ -2021,6 +2087,8 @@ static PyMethodDef PyEngine_methods[] = {
 	{"load_mesh", reinterpret_cast<PyCFunction>(PyEngine_load_mesh), METH_VARARGS, "Load retained mesh (float32 x6/vert + optional uint32 indices); returns handle."},
 	{"draw_mesh", reinterpret_cast<PyCFunction>(PyEngine_draw_mesh), METH_VARARGS, "Draw loaded mesh with column-major 4x4 model matrix and flat color."},
 	{"tick_mesh", reinterpret_cast<PyCFunction>(PyEngine_tick_mesh), METH_VARARGS, "Poll + clear color/depth + draw_mesh + present."},
+	{"draw_mesh_textured", reinterpret_cast<PyCFunction>(PyEngine_draw_mesh_textured), METH_VARARGS, "Draw loaded mesh textured from atlas (UV 0..1 full atlas, nearest, clamp)."},
+	{"tick_mesh_textured", reinterpret_cast<PyCFunction>(PyEngine_tick_mesh_textured), METH_VARARGS, "Poll + clear color/depth + draw_mesh_textured + present."},
 	{"lines_bulk", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk), METH_VARARGS, "Queue many lines from one int32 segment buffer."},
 	{"lines_bulk_colored", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk_colored), METH_VARARGS, "Queue many lines with per-segment packed colors."},
 	{"put_pixels_buffer", reinterpret_cast<PyCFunction>(PyEngine_put_pixels_buffer), METH_VARARGS, "Queue many pixels from interleaved int32 x,y pairs."},
