@@ -10,6 +10,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 namespace hyperlite::raster {
 
@@ -216,9 +223,157 @@ inline bool ProjectToPixels(
 }
 
 /**
- * Depth-tested Bresenham with perspective-correct depth (lerp z/w and 1/w in screen space).
+ * Plot one in-bounds pixel with optional depth (index already validated by clip).
+ */
+inline void PlotDepthPixel(
+	std::uint32_t* color_ptr,
+	float* depth_ptr,
+	const float z_win,
+	const std::uint32_t packed_color,
+	const std::uint32_t sa,
+	const bool opaque) {
+	if (depth_ptr != nullptr) {
+		if (!(z_win <= *depth_ptr)) {
+			return;
+		}
+		*depth_ptr = z_win;
+	}
+	if (opaque) {
+		*color_ptr = packed_color;
+	} else if (sa != 0U) {
+		StorePixel(color_ptr, packed_color);
+	}
+}
+
+/**
+ * Depth-tested horizontal span [x0, x1] inclusive at fixed y (window-space z lerped).
  *
- * depth may be null to skip the depth test (still draws color).
+ * Opaque + depth uses AVX2 8-wide compare/store when available; depth-null uses FillSpan.
+ */
+inline void DrawHorizontalSpanDepth(
+	std::uint32_t* dst,
+	float* depth_row_base,
+	const int width,
+	const int x0,
+	const int x1,
+	const int y,
+	const float z0_win,
+	const float z1_win,
+	const std::uint32_t packed_color,
+	const std::uint32_t sa,
+	const bool opaque,
+	PixelBounds& bounds) {
+	int xa = x0;
+	int xb = x1;
+	float za = z0_win;
+	float zb = z1_win;
+	if (xa > xb) {
+		std::swap(xa, xb);
+		std::swap(za, zb);
+	}
+	const int count = xb - xa + 1;
+	std::uint32_t* color_row = dst + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(xa);
+	bounds.Expand(xa, y);
+	bounds.Expand(xb, y);
+
+	if (depth_row_base == nullptr) {
+		FillSpan(color_row, static_cast<std::size_t>(count), packed_color);
+		return;
+	}
+
+	float* depth_row = depth_row_base + static_cast<std::size_t>(xa);
+	const float dz = count > 1 ? (zb - za) / static_cast<float>(count - 1) : 0.0f;
+
+	if (opaque) {
+		int i = 0;
+#if defined(__AVX2__)
+		__m256 z_vec = _mm256_setr_ps(
+			za,
+			za + dz,
+			za + 2.0f * dz,
+			za + 3.0f * dz,
+			za + 4.0f * dz,
+			za + 5.0f * dz,
+			za + 6.0f * dz,
+			za + 7.0f * dz);
+		const __m256 dz8 = _mm256_set1_ps(8.0f * dz);
+		const __m256i color_vec = _mm256_set1_epi32(static_cast<int>(packed_color));
+		for (; i + 8 <= count; i += 8) {
+			float* dptr = depth_row + i;
+			std::uint32_t* cptr = color_row + i;
+			const __m256 old_z = _mm256_loadu_ps(dptr);
+			const __m256 pass = _mm256_cmp_ps(z_vec, old_z, _CMP_LE_OQ);
+			const __m256 new_z = _mm256_blendv_ps(old_z, z_vec, pass);
+			_mm256_storeu_ps(dptr, new_z);
+			_mm256_maskstore_epi32(reinterpret_cast<int*>(cptr), _mm256_castps_si256(pass), color_vec);
+			z_vec = _mm256_add_ps(z_vec, dz8);
+		}
+		float z = za + static_cast<float>(i) * dz;
+#else
+		float z = za;
+#endif
+		for (; i < count; ++i, z += dz) {
+			if (z <= depth_row[i]) {
+				depth_row[i] = z;
+				color_row[i] = packed_color;
+			}
+		}
+		return;
+	}
+
+	float z = za;
+	for (int i = 0; i < count; ++i, z += dz) {
+		PlotDepthPixel(color_row + i, depth_row + i, z, packed_color, sa, false);
+	}
+}
+
+/**
+ * Depth-tested vertical span [y0, y1] inclusive at fixed x (window-space z lerped).
+ */
+inline void DrawVerticalSpanDepth(
+	std::uint32_t* dst,
+	float* depth_base,
+	const int width,
+	const int x,
+	const int y0,
+	const int y1,
+	const float z0_win,
+	const float z1_win,
+	const std::uint32_t packed_color,
+	const std::uint32_t sa,
+	const bool opaque,
+	PixelBounds& bounds) {
+	int ya = y0;
+	int yb = y1;
+	float za = z0_win;
+	float zb = z1_win;
+	if (ya > yb) {
+		std::swap(ya, yb);
+		std::swap(za, zb);
+	}
+	const int count = yb - ya + 1;
+	const std::size_t stride = static_cast<std::size_t>(width);
+	std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(ya) * stride) + static_cast<std::size_t>(x);
+	float* depth_ptr = depth_base != nullptr ? depth_base + (static_cast<std::size_t>(ya) * stride) + static_cast<std::size_t>(x) : nullptr;
+	bounds.Expand(x, ya);
+	bounds.Expand(x, yb);
+	const float dz = count > 1 ? (zb - za) / static_cast<float>(count - 1) : 0.0f;
+	float z = za;
+	for (int i = 0; i < count; ++i, z += dz) {
+		PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
+		color_ptr += stride;
+		if (depth_ptr != nullptr) {
+			depth_ptr += stride;
+		}
+	}
+}
+
+/**
+ * Depth-tested Bresenham with screen-space lerp of window depth (affine of NDC z = z/w).
+ *
+ * depth may be null to skip the depth test (still draws color). Exact horizontal/vertical
+ * use span fills (AVX2 depth+color when opaque). General segments use pointer-walked
+ * Bresenham with incremental window z — no per-pixel t, inv_w, or bounds re-check.
  */
 inline void DrawThinLineDepth(
 	std::uint32_t* dst,
@@ -244,7 +399,6 @@ inline void DrawThinLineDepth(
 		static_cast<unsigned int>(x1) < static_cast<unsigned int>(width) &&
 		static_cast<unsigned int>(y1) < static_cast<unsigned int>(height);
 	if (!endpoints_in_bounds) {
-		// Screen-space clip for pixel endpoints (depth lerped by clipped t is approximate).
 		float fx0 = static_cast<float>(x0);
 		float fy0 = static_cast<float>(y0);
 		float fx1 = static_cast<float>(x1);
@@ -279,6 +433,26 @@ inline void DrawThinLineDepth(
 		return;
 	}
 
+	// inv_w only participates in screen-clip lerp above; window depth is affine of NDC z.
+	(void)inv_w0;
+	(void)inv_w1;
+
+	const float z0_win = NdcToWindowDepth(depth0);
+	const float z1_win = NdcToWindowDepth(depth1);
+	const std::uint32_t sa = packed_color >> 24U;
+	const bool opaque = sa == 255U;
+	float* depth_base = (depth != nullptr && depth->Allocated()) ? depth->Data() : nullptr;
+
+	if (y0 == y1) {
+		float* depth_row = depth_base != nullptr ? depth_base + static_cast<std::size_t>(y0) * static_cast<std::size_t>(width) : nullptr;
+		DrawHorizontalSpanDepth(dst, depth_row, width, x0, x1, y0, z0_win, z1_win, packed_color, sa, opaque, bounds);
+		return;
+	}
+	if (x0 == x1) {
+		DrawVerticalSpanDepth(dst, depth_base, width, x0, y0, y1, z0_win, z1_win, packed_color, sa, opaque, bounds);
+		return;
+	}
+
 	bounds.Expand(x0, y0);
 	bounds.Expand(x1, y1);
 
@@ -287,98 +461,118 @@ inline void DrawThinLineDepth(
 	const int sx = x0 < x1 ? 1 : -1;
 	const int sy = y0 < y1 ? 1 : -1;
 	const std::size_t stride = static_cast<std::size_t>(width);
-	const std::uint32_t sa = packed_color >> 24U;
-	const bool opaque = sa == 255U;
 	const int steps = std::max(adx, ady);
-	const float step_scale = steps > 0 ? 1.0f / static_cast<float>(steps) : 0.0f;
+	const float dz = steps > 0 ? (z1_win - z0_win) / static_cast<float>(steps) : 0.0f;
 
-	/**
-	 * Perspective-correct depth at screen parameter t in [0,1]:
-	 * interpolate z/w and 1/w in screen space, recover NDC z, map to [0,1].
-	 * For attribute A = clip z: (lerp(z/w) / lerp(1/w)) * lerp(1/w) = lerp(z/w).
-	 */
-	auto depth_at = [&](const float t) -> float {
-		const float zw = depth0 + (depth1 - depth0) * t;
-		const float inv_w = inv_w0 + (inv_w1 - inv_w0) * t;
-		float z_ndc = zw;
-		if (std::fabs(inv_w) > 1e-20f) {
-			const float clip_z = zw / inv_w;
-			z_ndc = clip_z * inv_w;
-		}
-		return NdcToWindowDepth(z_ndc);
-	};
+	std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(y0) * stride) + static_cast<std::size_t>(x0);
+	float* depth_ptr = depth_base != nullptr ? depth_base + (static_cast<std::size_t>(y0) * stride) + static_cast<std::size_t>(x0) : nullptr;
+	float z = z0_win;
 
-	auto plot = [&](const int x, const int y, const float t) {
-		if (static_cast<unsigned int>(x) >= static_cast<unsigned int>(width) ||
-			static_cast<unsigned int>(y) >= static_cast<unsigned int>(height)) {
-			return;
-		}
-		const float z = depth_at(t);
-		if (depth != nullptr && !depth->TestAndWrite(x, y, z)) {
-			return;
-		}
-		std::uint32_t* ptr = dst + (static_cast<std::size_t>(y) * stride) + static_cast<std::size_t>(x);
-		if (opaque) {
-			*ptr = packed_color;
-		} else if (sa != 0U) {
-			StorePixel(ptr, packed_color);
-		}
-	};
-
-	if (adx >= ady) {
-		int err = adx / 2;
-		int y = y0;
-		int step = 0;
-		for (int x = x0; x != x1; x += sx, ++step) {
-			plot(x, y, static_cast<float>(step) * step_scale);
-			err -= ady;
-			if (err < 0) {
-				y += sy;
-				err += adx;
+	// Opaque + depth: tight loop (no alpha / null-depth branches). Common wireframe path.
+	if (opaque && depth_ptr != nullptr) {
+		if (adx >= ady) {
+			int err = adx / 2;
+			for (int step = 0; step < steps; ++step) {
+				if (z <= *depth_ptr) {
+					*depth_ptr = z;
+					*color_ptr = packed_color;
+				}
+				err -= ady;
+				color_ptr += sx;
+				depth_ptr += sx;
+				if (err < 0) {
+					color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+					depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+					err += adx;
+				}
+				z += dz;
+			}
+		} else {
+			int err = ady / 2;
+			for (int step = 0; step < steps; ++step) {
+				if (z <= *depth_ptr) {
+					*depth_ptr = z;
+					*color_ptr = packed_color;
+				}
+				err -= adx;
+				color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+				depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+				if (err < 0) {
+					color_ptr += sx;
+					depth_ptr += sx;
+					err += ady;
+				}
+				z += dz;
 			}
 		}
-		plot(x1, y1, 1.0f);
+		float* end_d = depth_base + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1);
+		if (z1_win <= *end_d) {
+			*end_d = z1_win;
+			dst[(static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1)] = packed_color;
+		}
 		return;
 	}
 
-	int err = ady / 2;
-	int x = x0;
-	int step = 0;
-	for (int y = y0; y != y1; y += sy, ++step) {
-		plot(x, y, static_cast<float>(step) * step_scale);
-		err -= adx;
-		if (err < 0) {
-			x += sx;
-			err += ady;
+	if (adx >= ady) {
+		int err = adx / 2;
+		for (int step = 0; step < steps; ++step) {
+			PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
+			err -= ady;
+			color_ptr += sx;
+			if (depth_ptr != nullptr) {
+				depth_ptr += sx;
+			}
+			if (err < 0) {
+				color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+				if (depth_ptr != nullptr) {
+					depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+				}
+				err += adx;
+			}
+			z += dz;
+		}
+	} else {
+		int err = ady / 2;
+		for (int step = 0; step < steps; ++step) {
+			PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
+			err -= adx;
+			color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+			if (depth_ptr != nullptr) {
+				depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
+			}
+			if (err < 0) {
+				color_ptr += sx;
+				if (depth_ptr != nullptr) {
+					depth_ptr += sx;
+				}
+				err += ady;
+			}
+			z += dz;
 		}
 	}
-	plot(x1, y1, 1.0f);
+
+	PlotDepthPixel(
+		dst + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1),
+		depth_base != nullptr ? depth_base + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1) : nullptr,
+		z1_win,
+		packed_color,
+		sa,
+		opaque);
 }
 
 /**
- * Transform one world-space segment, clip in homogeneous space, then rasterize.
+ * Raster one already-clipped (or trivial-in) clip-space segment to pixels.
  */
-inline void DrawWorldSegment(
+inline void DrawClipSegment(
 	std::uint32_t* dst,
 	DepthBuffer* depth,
 	const int width,
 	const int height,
-	const float* view_proj,
-	const float x0,
-	const float y0,
-	const float z0,
-	const float x1,
-	const float y1,
-	const float z1,
+	ClipVert a,
+	ClipVert b,
 	const std::uint32_t packed_color,
 	const int line_width,
 	PixelBounds& bounds) {
-	ClipVert a = MulViewProj(view_proj, x0, y0, z0);
-	ClipVert b = MulViewProj(view_proj, x1, y1, z1);
-	if (!ClipLineHomogeneous(a, b)) {
-		return;
-	}
-
 	float px0 = 0.0f;
 	float py0 = 0.0f;
 	float d0 = 0.0f;
@@ -418,6 +612,117 @@ inline void DrawWorldSegment(
 				dst, depth, width, height, ix0 + offset, iy0, ix1 + offset, iy1, d0, d1, iw0, iw1, packed_color, bounds);
 		}
 	}
+}
+
+/**
+ * Transform one world-space segment, clip in homogeneous space, then rasterize.
+ *
+ * Outcodes: trivial reject before clip; trivial accept skips Cohen–Sutherland.
+ */
+inline void DrawWorldSegment(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int width,
+	const int height,
+	const float* view_proj,
+	const float x0,
+	const float y0,
+	const float z0,
+	const float x1,
+	const float y1,
+	const float z1,
+	const std::uint32_t packed_color,
+	const int line_width,
+	PixelBounds& bounds) {
+	ClipVert a = MulViewProj(view_proj, x0, y0, z0);
+	ClipVert b = MulViewProj(view_proj, x1, y1, z1);
+	const int out_a = ComputeClipOutcode(a);
+	const int out_b = ComputeClipOutcode(b);
+	if ((out_a & out_b) != 0) {
+		return;
+	}
+	if ((out_a | out_b) != 0) {
+		if (!ClipLineHomogeneous(a, b)) {
+			return;
+		}
+	}
+	DrawClipSegment(dst, depth, width, height, a, b, packed_color, line_width, bounds);
+}
+
+#if defined(__AVX2__) && defined(__FMA__)
+/**
+ * Transform 8 world positions (AoS xyz packed as consecutive floats with stride 3) through MVP.
+ *
+ * Used to batch the two endpoints of four line segments. Writes clip xyzw into SoA temps.
+ */
+inline void TransformEightPositionsAvx2(
+	const float* mvp,
+	const float* p0,
+	const float* p1,
+	const float* p2,
+	const float* p3,
+	const float* p4,
+	const float* p5,
+	const float* p6,
+	const float* p7,
+	float* out_x,
+	float* out_y,
+	float* out_z,
+	float* out_w) {
+	const __m256 m0 = _mm256_set1_ps(mvp[0]);
+	const __m256 m1 = _mm256_set1_ps(mvp[1]);
+	const __m256 m2 = _mm256_set1_ps(mvp[2]);
+	const __m256 m3 = _mm256_set1_ps(mvp[3]);
+	const __m256 m4 = _mm256_set1_ps(mvp[4]);
+	const __m256 m5 = _mm256_set1_ps(mvp[5]);
+	const __m256 m6 = _mm256_set1_ps(mvp[6]);
+	const __m256 m7 = _mm256_set1_ps(mvp[7]);
+	const __m256 m8 = _mm256_set1_ps(mvp[8]);
+	const __m256 m9 = _mm256_set1_ps(mvp[9]);
+	const __m256 m10 = _mm256_set1_ps(mvp[10]);
+	const __m256 m11 = _mm256_set1_ps(mvp[11]);
+	const __m256 m12 = _mm256_set1_ps(mvp[12]);
+	const __m256 m13 = _mm256_set1_ps(mvp[13]);
+	const __m256 m14 = _mm256_set1_ps(mvp[14]);
+	const __m256 m15 = _mm256_set1_ps(mvp[15]);
+	const __m256 vx = _mm256_setr_ps(p0[0], p1[0], p2[0], p3[0], p4[0], p5[0], p6[0], p7[0]);
+	const __m256 vy = _mm256_setr_ps(p0[1], p1[1], p2[1], p3[1], p4[1], p5[1], p6[1], p7[1]);
+	const __m256 vz = _mm256_setr_ps(p0[2], p1[2], p2[2], p3[2], p4[2], p5[2], p6[2], p7[2]);
+	const __m256 cx = _mm256_fmadd_ps(m0, vx, _mm256_fmadd_ps(m4, vy, _mm256_fmadd_ps(m8, vz, m12)));
+	const __m256 cy = _mm256_fmadd_ps(m1, vx, _mm256_fmadd_ps(m5, vy, _mm256_fmadd_ps(m9, vz, m13)));
+	const __m256 cz = _mm256_fmadd_ps(m2, vx, _mm256_fmadd_ps(m6, vy, _mm256_fmadd_ps(m10, vz, m14)));
+	const __m256 cw = _mm256_fmadd_ps(m3, vx, _mm256_fmadd_ps(m7, vy, _mm256_fmadd_ps(m11, vz, m15)));
+	_mm256_storeu_ps(out_x, cx);
+	_mm256_storeu_ps(out_y, cy);
+	_mm256_storeu_ps(out_z, cz);
+	_mm256_storeu_ps(out_w, cw);
+}
+#endif
+
+/**
+ * Draw one world segment from pre-transformed clip endpoints + outcodes.
+ */
+inline void DrawWorldSegmentFromClip(
+	std::uint32_t* dst,
+	DepthBuffer* depth,
+	const int width,
+	const int height,
+	ClipVert a,
+	ClipVert b,
+	const int out_a,
+	const int out_b,
+	const std::uint32_t packed_color,
+	const int line_width,
+	PixelBounds& bounds) {
+	if ((out_a & out_b) != 0) {
+		return;
+	}
+	if ((out_a | out_b) != 0) {
+		if (!ClipLineHomogeneous(a, b)) {
+			return;
+		}
+	}
+	DrawClipSegment(dst, depth, width, height, a, b, packed_color, line_width, bounds);
 }
 
 /**
@@ -470,6 +775,7 @@ inline void DrawScreenSegment(
  * Raster world-space float segments [x0,y0,z0,x1,y1,z1,...] with view-proj + optional depth.
  *
  * When depth is non-null, OpenMP is disabled to avoid racy depth writes.
+ * When depth is null (2D-style color only), OpenMP over segments matches the 2D line path.
  */
 inline void RasterLines3dWorld(
 	FrameBuffer& framebuffer,
@@ -486,23 +792,123 @@ inline void RasterLines3dWorld(
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
 	PixelBounds bounds{};
-	for (std::size_t line = 0U; line < line_count; ++line) {
-		const std::size_t base = line * 6U;
-		detail3d::DrawWorldSegment(
-			dst,
-			depth,
-			width,
-			height,
-			view_proj16,
-			segments[base + 0U],
-			segments[base + 1U],
-			segments[base + 2U],
-			segments[base + 3U],
-			segments[base + 4U],
-			segments[base + 5U],
-			line_color,
-			line_width,
-			bounds);
+
+#if defined(_OPENMP)
+	InitOpenMpOnce();
+	constexpr std::size_t kParallelLineThreshold = 384U;
+	const bool parallel =
+		depth == nullptr && line_count >= kParallelLineThreshold && omp_get_max_threads() > 1;
+	if (parallel) {
+		const int max_threads = omp_get_max_threads();
+		std::vector<PixelBounds> thread_bounds(static_cast<std::size_t>(max_threads));
+		#pragma omp parallel for schedule(static)
+		for (int line = 0; line < static_cast<int>(line_count); ++line) {
+			const int tid = omp_get_thread_num();
+			const std::size_t base = static_cast<std::size_t>(line) * 6U;
+			detail3d::DrawWorldSegment(
+				dst,
+				nullptr,
+				width,
+				height,
+				view_proj16,
+				segments[base + 0U],
+				segments[base + 1U],
+				segments[base + 2U],
+				segments[base + 3U],
+				segments[base + 4U],
+				segments[base + 5U],
+				line_color,
+				line_width,
+				thread_bounds[static_cast<std::size_t>(tid)]);
+		}
+		MergeThreadBounds(bounds, thread_bounds);
+	} else
+#endif
+	{
+#if defined(__AVX2__) && defined(__FMA__)
+		// Batch MVP for 4 segments (8 endpoints) when AVX2+FMA is available.
+		std::size_t line = 0U;
+		alignas(32) float cx[8];
+		alignas(32) float cy[8];
+		alignas(32) float cz[8];
+		alignas(32) float cw[8];
+		for (; line + 4U <= line_count; line += 4U) {
+			const float* s0 = segments + line * 6U;
+			const float* s1 = segments + (line + 1U) * 6U;
+			const float* s2 = segments + (line + 2U) * 6U;
+			const float* s3 = segments + (line + 3U) * 6U;
+			detail3d::TransformEightPositionsAvx2(
+				view_proj16,
+				s0 + 0, s0 + 3,
+				s1 + 0, s1 + 3,
+				s2 + 0, s2 + 3,
+				s3 + 0, s3 + 3,
+				cx, cy, cz, cw);
+			for (int lane = 0; lane < 4; ++lane) {
+				const int i0 = lane * 2;
+				const int i1 = i0 + 1;
+				detail3d::ClipVert a{};
+				detail3d::ClipVert b{};
+				a.x = cx[i0];
+				a.y = cy[i0];
+				a.z = cz[i0];
+				a.w = cw[i0];
+				b.x = cx[i1];
+				b.y = cy[i1];
+				b.z = cz[i1];
+				b.w = cw[i1];
+				detail3d::DrawWorldSegmentFromClip(
+					dst,
+					depth,
+					width,
+					height,
+					a,
+					b,
+					detail3d::ComputeClipOutcode(a),
+					detail3d::ComputeClipOutcode(b),
+					line_color,
+					line_width,
+					bounds);
+			}
+		}
+		for (; line < line_count; ++line) {
+			const std::size_t base = line * 6U;
+			detail3d::DrawWorldSegment(
+				dst,
+				depth,
+				width,
+				height,
+				view_proj16,
+				segments[base + 0U],
+				segments[base + 1U],
+				segments[base + 2U],
+				segments[base + 3U],
+				segments[base + 4U],
+				segments[base + 5U],
+				line_color,
+				line_width,
+				bounds);
+		}
+#else
+		for (std::size_t line = 0U; line < line_count; ++line) {
+			const std::size_t base = line * 6U;
+			detail3d::DrawWorldSegment(
+				dst,
+				depth,
+				width,
+				height,
+				view_proj16,
+				segments[base + 0U],
+				segments[base + 1U],
+				segments[base + 2U],
+				segments[base + 3U],
+				segments[base + 4U],
+				segments[base + 5U],
+				line_color,
+				line_width,
+				bounds);
+		}
+#endif
 	}
 	if (bounds.valid) {
 		framebuffer.NoteDirtyRect(bounds.min_x, bounds.min_y, bounds.max_x + 1, bounds.max_y + 1);

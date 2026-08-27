@@ -99,7 +99,18 @@ public:
 			static_cast<unsigned int>(y) >= static_cast<unsigned int>(height_)) {
 			return false;
 		}
-		float& slot = depth_[static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) + static_cast<std::size_t>(x)];
+		return TestAndWriteIndex(
+			static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) + static_cast<std::size_t>(x),
+			z);
+	}
+
+	/**
+	 * Depth test/write at a precomputed linear index (caller guarantees in-bounds).
+	 *
+	 * Hot path for clipped 3D line/tri rasters that already validated x,y.
+	 */
+	bool TestAndWriteIndex(const std::size_t index, const float z) {
+		float& slot = depth_[index];
 		if (z <= slot) {
 			slot = z;
 			return true;
