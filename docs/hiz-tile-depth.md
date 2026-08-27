@@ -96,6 +96,10 @@ Paired interleaved before/after on this VM (Release, `-march=native`, OpenMP, he
 
 Two-draw tri bench: clear + occluder `Tris3d`, then back-field `Tris3d` without clearing depth. Mesh variant: `DrawMesh` occluder then grid mesh.
 
+### Tile AABB depth probe before edge setup — **not shipped**
+
+See [depth-prepass.md §4](depth-prepass.md#4-tile-aabb-depth-probe-before-half-space-setup--reverted-no-win): corner-min z/w probe (and tile-loop skip) before `MakeHalfEdge` / SIMD constants. Paired runs on this VM were ~noise — vertex Hi-Z already rejects the standard occluded back-field; probe overhead dominates when it rarely fires.
+
 ## Reproduce
 
 ```bash
