@@ -75,6 +75,7 @@ Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP
 | **SIMD `ScanTileMaxDepth` alone** (AVX2 8-wide) | Helps only if rescans remain; write-track removes the hot-path caller. Kept for tests / fallback. |
 | **Fixed-point / subpixel edge functions** | **Not shipped** (same rationale as AVX2 PR). |
 | **OpenMP over triangles** | Still **forbidden** (depth races). Tiles own pixels. |
+| **SIMD / streaming color + depth clear** | **Not shipped** — noise on cacheable SIMD; large loss with `MOVNT*` before immediate raster read. See [simd-clear.md](simd-clear.md). |
 
 ## Reproduce
 
