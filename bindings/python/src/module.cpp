@@ -209,18 +209,40 @@ static PyObject* PyEngine_new(PyTypeObject* type, PyObject* args, PyObject* kwar
  * Initialize native engine from Python constructor args.
  */
 static int PyEngine_init(PyEngineObject* self, PyObject* args, PyObject* kwargs) {
-	static const char* kwlist[] = {"width", "height", "backend", "title", nullptr};
+	static const char* kwlist[] = {"width", "height", "backend", "title", "present", nullptr};
 	int width = 0;
 	int height = 0;
 	const char* backend = "cpu";
 	const char* title = "Hyperlite";
+	const char* present = "auto";
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ii|ss", const_cast<char**>(kwlist), &width, &height, &backend, &title)) {
+	if (!PyArg_ParseTupleAndKeywords(
+			args,
+			kwargs,
+			"ii|sss",
+			const_cast<char**>(kwlist),
+			&width,
+			&height,
+			&backend,
+			&title,
+			&present)) {
 		return -1;
 	}
 
+	hyperlite::PresentMode present_mode = hyperlite::PresentMode::kAuto;
+	if (present != nullptr) {
+		if (std::strcmp(present, "headless") == 0) {
+			present_mode = hyperlite::PresentMode::kHeadless;
+		} else if (std::strcmp(present, "window") == 0) {
+			present_mode = hyperlite::PresentMode::kWindow;
+		} else if (std::strcmp(present, "auto") != 0) {
+			PyErr_SetString(PyExc_ValueError, "present must be 'auto', 'headless', or 'window'");
+			return -1;
+		}
+	}
+
 	try {
-		self->native_engine = new Engine(width, height, ParseBackendKind(backend), title);
+		self->native_engine = new Engine(width, height, ParseBackendKind(backend), title, present_mode);
 	} catch (const std::exception& ex) {
 		PyErr_SetString(PyExc_RuntimeError, ex.what());
 		return -1;

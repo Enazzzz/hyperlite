@@ -11,12 +11,12 @@
 #include "engine/command_buffer.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/input_state.hpp"
+#include "engine/iwindow.hpp"
 #include "engine/retained_layer.hpp"
 #include "engine/sprite_draw.hpp"
 
 #ifdef _WIN32
 #include "engine/dxgi_presenter.hpp"
-#include "engine/win32_window.hpp"
 #endif
 
 namespace hyperlite {
@@ -35,9 +35,17 @@ struct WireframeTimings {
 class Engine {
 public:
 	/**
-	 * Construct engine state and platform window.
+	 * Construct engine state and platform window (or headless present surface).
+	 *
+	 * present_mode defaults to kAuto: open a window when a display is available,
+	 * otherwise headless. Override with HYPERLITE_HEADLESS / HYPERLITE_PRESENT.
 	 */
-	Engine(int width, int height, BackendKind backend_kind, std::string title);
+	Engine(
+		int width,
+		int height,
+		BackendKind backend_kind,
+		std::string title,
+		PresentMode present_mode = PresentMode::kAuto);
 
 	/**
 	 * Flush async presents and release platform resources.
@@ -410,8 +418,8 @@ private:
 	float wireframe_raster_ms_ = 0.0f;
 	std::chrono::steady_clock::time_point record_start_{};
 	bool record_active_ = false;
+	std::unique_ptr<IWindow> window_{};
 #ifdef _WIN32
-	std::unique_ptr<Win32Window> window_{};
 	std::unique_ptr<DxgiPresenter> dxgi_presenter_{};
 #endif
 };

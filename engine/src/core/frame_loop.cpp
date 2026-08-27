@@ -8,7 +8,12 @@
 
 namespace hyperlite {
 
-Engine::Engine(const int width, const int height, const BackendKind backend_kind, std::string title)
+Engine::Engine(
+	const int width,
+	const int height,
+	const BackendKind backend_kind,
+	std::string title,
+	const PresentMode present_mode)
 	: framebuffer_(width, height),
 	  backend_(CreateBackend(backend_kind)) {
 	command_buffer_.Reserve(command_buffer_reserve_);
@@ -16,28 +21,26 @@ Engine::Engine(const int width, const int height, const BackendKind backend_kind
 		throw std::runtime_error("Failed to create rendering backend.");
 	}
 	backend_->EnsureSized(width, height);
-#ifdef _WIN32
-	window_ = std::make_unique<Win32Window>(width, height, std::move(title));
-	window_->SetVsync(vsync_);
-	const int client_w = window_->Width();
-	const int client_h = window_->Height();
-	if (client_w != width || client_h != height) {
-		framebuffer_.Resize(client_w, client_h);
-		backend_->EnsureSized(client_w, client_h);
+	window_ = CreatePlatformWindow(width, height, std::move(title), present_mode);
+	if (window_) {
+		window_->SetVsync(vsync_);
+		const int client_w = window_->Width();
+		const int client_h = window_->Height();
+		if (client_w != width || client_h != height) {
+			framebuffer_.Resize(client_w, client_h);
+			backend_->EnsureSized(client_w, client_h);
+		}
 	}
+#ifdef _WIN32
 	EnsureDxgiPresenter();
-#else
-	(void)title;
 #endif
 }
 
 Engine::~Engine() {
-#ifdef _WIN32
 	if (window_) {
 		window_->SetAsyncPresent(false);
 		window_->FlushAsyncPresent();
 	}
-#endif
 }
 
 void Engine::BeginFrame() {
@@ -271,27 +274,28 @@ void Engine::Present() {
 			const bool dxgi_ready = dxgi_present_ && dxgi_presenter_ != nullptr && dxgi_presenter_->Valid();
 			if (dxgi_ready) {
 				(void)PresentHostFrame(ready, dimensions.Width(), dimensions.Height());
-			} else if (window_) {
+			} else
+#endif
+			if (window_) {
 				if (IsCpuBackend() && window_->AsyncPresentEnabled()) {
 					window_->PresentRawAsync(ready, dimensions.Width(), dimensions.Height());
 				} else {
 					window_->PresentRaw(ready, dimensions.Width(), dimensions.Height());
 				}
 			}
-#else
-			(void)ready;
-#endif
 		}
 		present_ms_ = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - present_start).count());
 		return;
 	}
 	backend_->ReadbackToHost(ActiveFramebuffer());
-#ifdef _WIN32
 	const FrameBuffer& framebuffer = ActiveFramebuffer();
+#ifdef _WIN32
 	EnsureDxgiPresenter();
 	if (dxgi_present_ && dxgi_presenter_ != nullptr && dxgi_presenter_->Valid()) {
 		PresentFramebuffer(framebuffer);
-	} else if (window_) {
+	} else
+#endif
+	if (window_) {
 		if (dirty_present_ && framebuffer.DirtyActive()) {
 			int x0 = 0;
 			int y0 = 0;
@@ -321,7 +325,6 @@ void Engine::Present() {
 			window_->Present(framebuffer);
 		}
 	}
-#endif
 	present_ms_ = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - present_start).count());
 }
 
@@ -488,20 +491,20 @@ void Engine::SetPipelined(const bool enabled) {
 	cpu_present_has_prev_ = false;
 	if (enabled && IsCpuBackend()) {
 		framebuffer_alt_.Resize(framebuffer_.Width(), framebuffer_.Height());
-#ifdef _WIN32
 		if (window_) {
+#ifdef _WIN32
 			EnsureDxgiPresenter();
 			const bool dxgi_ready = dxgi_present_ && dxgi_presenter_ != nullptr && dxgi_presenter_->Valid();
 			window_->SetAsyncPresent(!dxgi_ready);
-		}
+#else
+			window_->SetAsyncPresent(false);
 #endif
+		}
 	} else if (!enabled) {
-#ifdef _WIN32
 		if (window_) {
 			window_->SetAsyncPresent(false);
 			window_->FlushAsyncPresent();
 		}
-#endif
 	}
 }
 
@@ -554,7 +557,6 @@ double Engine::DeltaTime() const {
 }
 
 void Engine::PollEvents() {
-#ifdef _WIN32
 	if (window_) {
 		window_->PollEvents(input_state_);
 		int resize_w = 0;
@@ -563,7 +565,6 @@ void Engine::PollEvents() {
 			ApplyFramebufferResize(resize_w, resize_h);
 		}
 	}
-#endif
 }
 
 const InputState& Engine::GetInputState() const {
@@ -575,11 +576,7 @@ std::string_view Engine::BackendName() const {
 }
 
 bool Engine::IsRunning() const {
-#ifdef _WIN32
 	return window_ && window_->IsAlive() && !input_state_.quit_requested;
-#else
-	return !input_state_.quit_requested;
-#endif
 }
 
 FrameBuffer& Engine::MutableFrameBuffer() {
@@ -616,14 +613,10 @@ const std::uint8_t* Engine::PresentPipelinedCpu() {
 }
 
 void Engine::SetMouseCaptured(const bool captured) {
-#ifdef _WIN32
 	if (window_) {
 		window_->SetMouseCaptured(captured);
 		input_state_.mouse_captured = captured;
 	}
-#else
-	(void)captured;
-#endif
 }
 
 bool Engine::MouseCaptured() const {
@@ -631,21 +624,13 @@ bool Engine::MouseCaptured() const {
 }
 
 void Engine::SetFullscreen(const bool fullscreen) {
-#ifdef _WIN32
 	if (window_) {
 		window_->SetFullscreen(fullscreen);
 	}
-#else
-	(void)fullscreen;
-#endif
 }
 
 bool Engine::IsFullscreen() const {
-#ifdef _WIN32
 	return window_ && window_->IsFullscreen();
-#else
-	return false;
-#endif
 }
 
 void Engine::WindowSize(int& width, int& height) const {
@@ -654,14 +639,12 @@ void Engine::WindowSize(int& width, int& height) const {
 }
 
 void Engine::SetWindowSize(const int width, const int height) {
-#ifdef _WIN32
 	if (window_) {
 		window_->SetClientSize(width, height);
 		ApplyFramebufferResize(window_->Width(), window_->Height());
+	} else {
+		ApplyFramebufferResize(width, height);
 	}
-#else
-	ApplyFramebufferResize(width, height);
-#endif
 }
 
 void Engine::ApplyFramebufferResize(const int width, const int height) {
@@ -710,25 +693,21 @@ void Engine::EnsureDxgiPresenter() {
 }
 
 bool Engine::PresentHostFrame(const std::uint8_t* pixels, const int width, const int height) {
-#ifdef _WIN32
 	if (pixels == nullptr || width <= 0 || height <= 0) {
 		return false;
 	}
+#ifdef _WIN32
 	if (dxgi_present_) {
 		EnsureDxgiPresenter();
 		if (dxgi_presenter_ != nullptr && dxgi_presenter_->Valid()) {
 			return dxgi_presenter_->CopyFromHostAndPresent(pixels, width, height);
 		}
 	}
+#endif
 	if (window_ != nullptr) {
 		window_->PresentRaw(pixels, width, height);
 		return true;
 	}
-#else
-	(void)pixels;
-	(void)width;
-	(void)height;
-#endif
 	return false;
 }
 
@@ -747,15 +726,13 @@ void Engine::SetLineSortThreshold(const std::size_t threshold) {
 
 void Engine::SetVsync(const bool enabled) {
 	vsync_ = enabled;
-#ifdef _WIN32
 	if (window_) {
 		window_->SetVsync(enabled);
 	}
+#ifdef _WIN32
 	if (dxgi_presenter_) {
 		dxgi_presenter_->SetVsync(enabled);
 	}
-#else
-	(void)enabled;
 #endif
 }
 

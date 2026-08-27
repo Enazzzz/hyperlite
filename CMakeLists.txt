@@ -11,7 +11,10 @@ option(HYPERLITE_BUILD_PYTHON_BINDINGS "Build Python extension module" ON)
 option(HYPERLITE_ENABLE_CUDA "Build CUDA backend when toolkit is available" ON)
 option(HYPERLITE_BUILD_BENCHMARKS "Build benchmark binaries" ON)
 option(HYPERLITE_BUILD_TESTS "Build test binaries" ON)
+option(HYPERLITE_ENABLE_X11 "Enable X11 windowed present on Linux when libs are found" ON)
+set(HYPERLITE_MARCH "native" CACHE STRING "Release -march value on non-MSVC (empty disables; use x86-64 for portable)")
 set(HYPERLITE_CUDA_ENABLED OFF)
+set(HYPERLITE_HAS_X11 0)
 
 if(MSVC)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -40,30 +43,76 @@ else()
 		$<$<COMPILE_LANGUAGE:CXX>:-Wextra>
 		$<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
-		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-march=native>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-ffast-math>
 	)
+	if(HYPERLITE_MARCH STREQUAL "")
+		message(STATUS "HYPERLITE_MARCH empty: portable scalar/SSE codegen (no -march).")
+	else()
+		add_compile_options(
+			$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-march=${HYPERLITE_MARCH}>
+		)
+		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH} (AVX2 used only when the arch enables __AVX2__).")
+	endif()
 endif()
 
-add_library(hyperlite_engine STATIC
+set(HYPERLITE_ENGINE_SOURCES
 	engine/src/core/frame_loop.cpp
 	engine/src/core/atlas_store.cpp
 	engine/src/core/retained_layer.cpp
 	engine/src/core/command_buffer_sort.cpp
-	engine/src/platform/win32_window.cpp
-	engine/src/platform/dxgi_presenter.cpp
+	engine/src/platform/platform_window.cpp
+	engine/src/platform/headless_window.cpp
 	engine/src/backend/cpu_backend.cpp
 	engine/src/backend/backend_selector.cpp
 	engine/src/backend/cuda_backend.cpp
 	engine/src/raster/rasterizer.cpp
 )
 
+if(WIN32)
+	list(APPEND HYPERLITE_ENGINE_SOURCES
+		engine/src/platform/win32_window.cpp
+		engine/src/platform/dxgi_presenter.cpp
+	)
+else()
+	if(HYPERLITE_ENABLE_X11)
+		find_package(X11)
+		if(X11_FOUND AND X11_Xext_FOUND)
+			set(HYPERLITE_HAS_X11 1)
+			list(APPEND HYPERLITE_ENGINE_SOURCES engine/src/platform/x11_window.cpp)
+			message(STATUS "X11 present enabled (libX11 + libXext).")
+		else()
+			message(STATUS "X11 / Xext not found; building headless-only present path.")
+		endif()
+	else()
+		message(STATUS "HYPERLITE_ENABLE_X11=OFF; building headless-only present path.")
+	endif()
+endif()
+
+add_library(hyperlite_engine STATIC ${HYPERLITE_ENGINE_SOURCES})
+
 target_include_directories(hyperlite_engine PUBLIC engine/include)
+target_compile_definitions(hyperlite_engine PUBLIC HYPERLITE_HAS_X11=${HYPERLITE_HAS_X11})
 set_property(TARGET hyperlite_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
+if(NOT MSVC)
+	find_package(OpenMP)
+	if(OpenMP_CXX_FOUND)
+		target_link_libraries(hyperlite_engine PUBLIC OpenMP::OpenMP_CXX)
+	else()
+		message(WARNING "OpenMP not found; CPU line batches will not parallelize.")
+	endif()
+endif()
+
+if(HYPERLITE_HAS_X11)
+	target_include_directories(hyperlite_engine PRIVATE ${X11_INCLUDE_DIR})
+	target_link_libraries(hyperlite_engine PUBLIC ${X11_LIBRARIES} ${X11_Xext_LIB})
+endif()
+
 if(HYPERLITE_ENABLE_CUDA)
-	enable_language(CUDA OPTIONAL)
+	include(CheckLanguage)
+	check_language(CUDA)
 	if(CMAKE_CUDA_COMPILER)
+		enable_language(CUDA)
 		set(HYPERLITE_CUDA_ENABLED ON)
 		find_package(CUDAToolkit REQUIRED)
 		target_sources(hyperlite_engine PRIVATE
@@ -97,6 +146,12 @@ if(HYPERLITE_BUILD_PYTHON_BINDINGS)
 		target_link_libraries(hyperlite_python PRIVATE hyperlite_engine)
 		target_compile_definitions(hyperlite_python PRIVATE PY_SSIZE_T_CLEAN)
 		set_target_properties(hyperlite_python PROPERTIES OUTPUT_NAME hyperlite PREFIX "")
+		# Ensure a proper extension suffix (.pyd / .cpython-*.so) for import and setuptools.
+		if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+			set_target_properties(hyperlite_python PROPERTIES SUFFIX ".pyd")
+		elseif(DEFINED Python3_SOABI AND NOT Python3_SOABI STREQUAL "")
+			set_target_properties(hyperlite_python PROPERTIES SUFFIX ".${Python3_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}")
+		endif()
 	else()
 		message(WARNING "Python3 development headers not found; skipping bindings.")
 	endif()
@@ -121,7 +176,15 @@ if(HYPERLITE_BUILD_BENCHMARKS)
 endif()
 
 if(HYPERLITE_BUILD_TESTS)
+	enable_testing()
+
 	add_executable(reference_render_tests tests/reference_render_tests.cpp)
 	target_link_libraries(reference_render_tests PRIVATE hyperlite_engine)
 	set_property(TARGET reference_render_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	add_test(NAME reference_render_tests COMMAND reference_render_tests)
+
+	add_executable(headless_smoke_test tests/headless_smoke_test.cpp)
+	target_link_libraries(headless_smoke_test PRIVATE hyperlite_engine)
+	set_property(TARGET headless_smoke_test PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	add_test(NAME headless_smoke_test COMMAND headless_smoke_test)
 endif()
