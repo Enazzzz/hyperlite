@@ -847,6 +847,178 @@ static PyObject* PyEngine_tick_lines_poll(PyEngineObject* self, PyObject* args) 
 }
 
 /**
+ * Enable or disable the float32 depth plane (allocates / frees to match framebuffer).
+ */
+static PyObject* PyEngine_enable_depth(PyEngineObject* self, PyObject* args) {
+	int enabled = 0;
+	if (!PyArg_ParseTuple(args, "p", &enabled)) {
+		return nullptr;
+	}
+	self->native_engine->EnableDepth(enabled != 0);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Return whether depth testing is enabled.
+ */
+static PyObject* PyEngine_depth_enabled(PyEngineObject* self, PyObject* args) {
+	(void)args;
+	if (self->native_engine->DepthEnabled()) {
+		Py_RETURN_TRUE;
+	}
+	Py_RETURN_FALSE;
+}
+
+/**
+ * Set column-major 4x4 world→clip matrix from a contiguous float32 buffer (16 values).
+ */
+static PyObject* PyEngine_set_view_proj(PyEngineObject* self, PyObject* args) {
+	PyObject* matrix_obj = nullptr;
+	if (!PyArg_ParseTuple(args, "O", &matrix_obj)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(matrix_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "matrix must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len != static_cast<Py_ssize_t>(sizeof(float) * 16U)) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "view-proj must be exactly 16 float32 values (column-major).");
+		return nullptr;
+	}
+	self->native_engine->SetViewProj(reinterpret_cast<const float*>(view.buf));
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Fused poll + clear color/depth + world-space 3D lines + present.
+ *
+ * world_segs: contiguous float32 with line_count * 6 values (x0,y0,z0,x1,y1,z1,...).
+ */
+static PyObject* PyEngine_tick_lines_3d(PyEngineObject* self, PyObject* args) {
+	PyObject* segments_obj = nullptr;
+	int clear_r = 0;
+	int clear_g = 0;
+	int clear_b = 0;
+	int clear_a = 255;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	int width = 1;
+	if (!PyArg_ParseTuple(args, "Oiiiiiiii|i", &segments_obj, &clear_r, &clear_g, &clear_b, &clear_a, &r, &g, &b, &a, &width)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(segments_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "world_segs must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 6) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "world_segs length must be a multiple of 6 float32 values per line.");
+		return nullptr;
+	}
+	const std::size_t line_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 6U);
+	const Color clear_color{
+		static_cast<std::uint8_t>(clear_r),
+		static_cast<std::uint8_t>(clear_g),
+		static_cast<std::uint8_t>(clear_b),
+		static_cast<std::uint8_t>(clear_a)};
+	const Color line_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	const int draw_count = self->native_engine->TickLines3d(
+		hyperlite::PackColor(clear_color),
+		reinterpret_cast<const float*>(view.buf),
+		line_count,
+		hyperlite::PackColor(line_color),
+		width);
+	PyBuffer_Release(&view);
+	return PyLong_FromLong(draw_count);
+}
+
+/**
+ * Flush pending 2D, then draw world-space 3D lines (float32 x6 per segment).
+ */
+static PyObject* PyEngine_lines_3d(PyEngineObject* self, PyObject* args) {
+	PyObject* segments_obj = nullptr;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	int width = 1;
+	if (!PyArg_ParseTuple(args, "Oiii|ii", &segments_obj, &r, &g, &b, &a, &width)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(segments_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "world_segs must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 6) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "world_segs length must be a multiple of 6 float32 values per line.");
+		return nullptr;
+	}
+	const std::size_t line_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 6U);
+	const Color line_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	self->native_engine->Lines3d(
+		reinterpret_cast<const float*>(view.buf),
+		line_count,
+		hyperlite::PackColor(line_color),
+		width);
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Screen-space escape hatch: pixel xy + NDC z [-1,1] per endpoint (float32 x6).
+ */
+static PyObject* PyEngine_lines_3d_screen(PyEngineObject* self, PyObject* args) {
+	PyObject* segments_obj = nullptr;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	int width = 1;
+	if (!PyArg_ParseTuple(args, "Oiii|ii", &segments_obj, &r, &g, &b, &a, &width)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(segments_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "screen_segs must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 6) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "screen_segs length must be a multiple of 6 float32 values per line.");
+		return nullptr;
+	}
+	const std::size_t line_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 6U);
+	const Color line_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	self->native_engine->Lines3dScreen(
+		reinterpret_cast<const float*>(view.buf),
+		line_count,
+		hyperlite::PackColor(line_color),
+		width);
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+/**
  * Queue many line commands from one int32 segment buffer.
  */
 static PyObject* PyEngine_lines_bulk(PyEngineObject* self, PyObject* args) {
@@ -1551,6 +1723,12 @@ static PyMethodDef PyEngine_methods[] = {
 	{"tick_lines", reinterpret_cast<PyCFunction>(PyEngine_tick_lines), METH_VARARGS, "Poll + clear + parallel wireframe batch + present in one call."},
 	{"tick_lines_poll", reinterpret_cast<PyCFunction>(PyEngine_tick_lines_poll), METH_VARARGS, "Poll + clear + parallel CPU wireframe + present."},
 	{"tick_lines_gpu", reinterpret_cast<PyCFunction>(PyEngine_tick_lines_gpu), METH_VARARGS, "Poll + clear + GPU line batch + present in one call."},
+	{"enable_depth", reinterpret_cast<PyCFunction>(PyEngine_enable_depth), METH_VARARGS, "Allocate/free float32 depth plane matching the framebuffer."},
+	{"depth_enabled", reinterpret_cast<PyCFunction>(PyEngine_depth_enabled), METH_NOARGS, "Return whether depth testing is enabled."},
+	{"set_view_proj", reinterpret_cast<PyCFunction>(PyEngine_set_view_proj), METH_VARARGS, "Set column-major 4x4 world→clip matrix (16 float32)."},
+	{"tick_lines_3d", reinterpret_cast<PyCFunction>(PyEngine_tick_lines_3d), METH_VARARGS, "Poll + clear color/depth + world-space 3D lines + present."},
+	{"lines_3d", reinterpret_cast<PyCFunction>(PyEngine_lines_3d), METH_VARARGS, "Flush pending 2D then draw world-space 3D lines (float32 x6)."},
+	{"lines_3d_screen", reinterpret_cast<PyCFunction>(PyEngine_lines_3d_screen), METH_VARARGS, "Pixel xy + NDC z [-1,1] lines (float32 x6); skips view-proj."},
 	{"lines_bulk", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk), METH_VARARGS, "Queue many lines from one int32 segment buffer."},
 	{"lines_bulk_colored", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk_colored), METH_VARARGS, "Queue many lines with per-segment packed colors."},
 	{"put_pixels_buffer", reinterpret_cast<PyCFunction>(PyEngine_put_pixels_buffer), METH_VARARGS, "Queue many pixels from interleaved int32 x,y pairs."},

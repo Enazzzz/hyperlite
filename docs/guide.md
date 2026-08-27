@@ -54,7 +54,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 
 ### Not good for (today)
 
-- 3D, shaders, or a full UI toolkit
+- Full 3D meshes, shaders, PBR, or a scene graph (depth-tested **wireframe** lines are Layer 0 — see [3d-plan.md](3d-plan.md))
 - macOS (Windows + Linux only for now)
 - “Drop in PNG and forget” without using `load_atlas` / `blit_rgba`
 - Built-in text rendering, physics, or networking
@@ -445,6 +445,35 @@ while engine.is_running():
 | 50 – 500 | `lines_bulk()` inside `begin_frame` | Mix with rects/sprites same frame |
 | 500 – 100,000+ | `tick_lines()` or `tick_lines_poll()` | Dedicated wireframe frame |
 | Per-segment colors | `lines_bulk_colored(segments, colors, …)` | Slightly more bandwidth |
+| World-space 3D wireframe | `tick_lines_3d` / `lines_3d` + `enable_depth` | See below |
+
+### 3D depth-tested wireframe (Layer 0)
+
+For NULLLIGHT-style FPS wireframe, keep projection on the CPU side of the game, or pass **world-space** segments and let Hyperlite project/clip/depth-test:
+
+```python
+import numpy as np
+import hyperlite
+
+engine = hyperlite.Engine(1280, 720, "cpu", present="headless")
+engine.enable_depth(True)                 # float32 depth plane; clear = 1.0
+engine.set_view_proj(view_proj_matrix16)  # column-major float32[16]; identity = world is clip
+
+world = np.zeros((N, 6), dtype=np.float32)  # x0,y0,z0, x1,y1,z1
+engine.tick_lines_3d(world[:n], 8, 12, 24, 255, 0, 255, 80, 255, width=1)
+
+# Mixed frame: 3D then 2D HUD (HUD ignores depth)
+engine.begin_frame()
+engine.clear(0, 0, 0, 255)
+engine.lines_3d(world[:n], 0, 255, 80, 255, width=1)
+engine.rect_fill(8, 8, 64, 16, 255, 255, 255, 255)
+engine.tick()
+```
+
+- Clip happens in **homogeneous clip space before** perspective divide (near plane required).
+- `lines_3d_screen(segs)` takes pixel `xy` + NDC `z` in `[-1,1]` (skips view-proj).
+- `enable_depth(False)` frees the depth plane; 2D paths are unchanged.
+- Roadmap: [3d-plan.md](3d-plan.md). Benches: [3d-wireframe-bench.md](3d-wireframe-bench.md).
 
 ### Mixed frames (wireframe + HUD + sprites)
 
@@ -1083,6 +1112,11 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `tick_lines(segments, cr, cg, cb, ca, r, g, b, a=255, width=1)` | Poll + clear + parallel CPU lines + present |
 | `tick_lines_poll(...)` | Same as `tick_lines` |
 | `tick_lines_gpu(...)` | Poll + clear + GPU lines + present |
+| `enable_depth(bool)` / `depth_enabled()` | Allocate/free float32 depth plane |
+| `set_view_proj(matrix16)` | Column-major world→clip (16 float32) |
+| `tick_lines_3d(world_segs, cr..ca, r..a, width=1)` | Poll + clear color/depth + 3D lines + present |
+| `lines_3d(world_segs, r, g, b, a=255, width=1)` | Flush pending 2D, draw world-space 3D lines |
+| `lines_3d_screen(segs, ...)` | Pixel xy + NDC z `[-1,1]` (float32×6); skips view-proj |
 | `tick_gpu_spiro(...)` | Poll + GPU spiro scene + present |
 
 ### Sprites & layers
@@ -1099,6 +1133,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 
 - `sprite_buffer`: **7 × int32 per sprite** — `(atlas_id, src_x, src_y, width, height, dst_x, dst_y)`
 - `segments`: **4 × int32 per line** — `(x0, y0, x1, y1)`
+- `world_segs` / 3D screen segs: **6 × float32 per line** — `(x0,y0,z0, x1,y1,z1)`
 
 ### Advanced / introspection
 

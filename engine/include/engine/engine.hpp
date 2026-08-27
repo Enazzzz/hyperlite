@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 #include "engine/atlas_store.hpp"
 #include "engine/backend_interface.hpp"
 #include "engine/command_buffer.hpp"
+#include "engine/depth_buffer.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/input_state.hpp"
 #include "engine/iwindow.hpp"
@@ -195,6 +197,57 @@ public:
 		int line_width = 1);
 
 	/**
+	 * Allocate or free the float32 depth plane (matches framebuffer; resizes with window).
+	 *
+	 * When disabled, 2D behavior matches the pre-3D path exactly.
+	 */
+	void EnableDepth(bool enabled);
+
+	/**
+	 * Whether a depth plane is currently allocated and used by 3D lines.
+	 */
+	bool DepthEnabled() const;
+
+	/**
+	 * Set the column-major 4x4 world→clip matrix (16 float32). Identity = world is clip.
+	 */
+	void SetViewProj(const float* matrix16);
+
+	/**
+	 * Fused poll + clear color/depth + world-space 3D lines + present.
+	 *
+	 * world_segs: line_count * 6 float32 values — x0,y0,z0, x1,y1,z1 per segment.
+	 */
+	int TickLines3d(
+		std::uint32_t clear_packed,
+		const float* world_segs,
+		std::size_t line_count,
+		std::uint32_t line_packed,
+		int line_width = 1);
+
+	/**
+	 * Flush pending 2D commands, then raster world-space 3D lines (uses view-proj + depth if on).
+	 *
+	 * Call inside begin_frame / tick so HUD 2D draws after this still composite on top.
+	 */
+	void Lines3d(
+		const float* world_segs,
+		std::size_t line_count,
+		std::uint32_t line_packed,
+		int line_width = 1);
+
+	/**
+	 * Screen-space escape hatch: pixel xy + NDC z in [-1,1] per endpoint (float32 x6).
+	 *
+	 * Skips view-proj and frustum clip. Depth-tests when depth is enabled.
+	 */
+	void Lines3dScreen(
+		const float* screen_segs,
+		std::size_t line_count,
+		std::uint32_t line_packed,
+		int line_width = 1);
+
+	/**
 	 * Queue many put-pixel commands from interleaved int32 x,y pairs.
 	 */
 	void PutPixelsBuffer(const std::int32_t* xy_pairs, std::size_t count, std::uint32_t packed_color);
@@ -208,6 +261,11 @@ public:
 	 * Host framebuffer byte size.
 	 */
 	std::size_t FramebufferBytes() const;
+
+	/**
+	 * Read-only depth sample at pixel (1.0 if depth off / OOB). For tests.
+	 */
+	float DepthAt(int x, int y) const;
 
 	/**
 	 * Replay a retained layer directly on the active backend (GPU path).
@@ -379,6 +437,16 @@ private:
 	bool IsCpuBackend() const;
 
 	/**
+	 * Flush queued 2D commands so subsequent immediate 3D draws composite correctly.
+	 */
+	void FlushPending2d();
+
+	/**
+	 * Active depth plane pointer when enabled, else nullptr.
+	 */
+	DepthBuffer* ActiveDepth();
+
+	/**
 	 * Create or validate the DXGI swapchain presenter.
 	 */
 	void EnsureDxgiPresenter();
@@ -396,6 +464,13 @@ private:
 	CommandBuffer command_buffer_{};
 	FrameBuffer framebuffer_{};
 	FrameBuffer framebuffer_alt_{};
+	DepthBuffer depth_buffer_{};
+	bool depth_enabled_ = false;
+	std::array<float, 16> view_proj_{
+		1.0f, 0.0f, 0.0f, 0.0f,
+		0.0f, 1.0f, 0.0f, 0.0f,
+		0.0f, 0.0f, 1.0f, 0.0f,
+		0.0f, 0.0f, 0.0f, 1.0f};
 	AtlasStore atlas_store_{};
 	InputState input_state_{};
 	std::unique_ptr<IRenderBackend> backend_{};
