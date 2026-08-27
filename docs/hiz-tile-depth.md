@@ -10,6 +10,7 @@ Per-64×64-tile hierarchical depth for the CPU triangle raster. When a tile’s 
 - **Reject rule:** `tri_min > tile_max` → skip `RasterScreenTriTile` for this tile (conservative: if even the nearest vertex is behind the tile’s farthest occluder, every covered pixel fails the depth test).
 - **Update:** After the first raster write in a tile, `tile_max` advances from the farthest depth actually written by that triangle (`MergeTileHiZFromWrite`). No per-triangle 64×64 depth rescan. `ScanTileMaxDepth` remains for tests / fallback (AVX2 8-wide reduction when available).
 - **Row skip:** When a triangle fully covers its pixel AABB inside the tile and every interpolated depth on a row exceeds `tile_max`, the row skips the pixel loop (conservative: `z > tile_max` implies failure vs all stored samples in the tile).
+- **Front-to-back bin order:** Before tile binning, draws with depth on may reorder tris by cached `tri_min` (ascending). Nearer tris raster first so write-track `tile_max` is tighter when overlapping farther tris in the same draw are processed. Skipped when: (1) an 8-sample probe looks uniform-depth (flat mesh), (2) depth span is negligible, (3) ≤4 tris sit at the global minimum (fullscreen occluder prefix already nearest-first), or (4) >25% of tris share the minimum depth (coplanar layer — reorder cannot help).
 
 OpenMP still parallelizes over tiles; Hi-Z state is per tile with no cross-tile sharing.
 
@@ -44,6 +45,20 @@ Occluded tri gains from fewer rescans on partial occluder tiles plus row skip. O
 | `cpu_mesh_bench occluded` | 243 ms (**4.84e6** tris/s) | 167 ms (**7.04e6** tris/s) | **~−31%** |
 
 Occluded tri: 2 front tris + 10 000 back tris in one `TickTris3d`. Occluded mesh: combined mesh (2 occluder tris + 70×70 grid) in one `TickMesh`.
+
+### Front-to-back sort (write-track + in-draw Hi-Z), same session
+
+Paired before/after on write-track baseline (`main` after PR #19). Release, `-march=native`, OpenMP, headless.
+
+| Bench | Before (write-track) | After (+ front-to-back) | Δ |
+|-------|----------------------|---------------------------|---|
+| `cpu_tri_bench` | **4.52e6** tris/s (265 ms) | **7.88e6** tris/s (152 ms) | **~+74%** |
+| `cpu_tri_bench occluded` | **5.37e6** tris/s (224 ms) | **5.17e6** tris/s (232 ms) | **~noise** |
+| `cpu_mesh_bench` flat | **8.09e6** tris/s (145 ms) | **7.42e6** tris/s (159 ms) | **~noise** |
+| `cpu_mesh_bench` textured | **7.22e6** tris/s (163 ms) | **6.75e6** tris/s (174 ms) | **~noise** |
+| `cpu_mesh_bench` occluded | **5.86e6** tris/s (201 ms) | **5.74e6** tris/s (205 ms) | **~noise** |
+
+Open tri (10k scattered quads, varying `z`): sort enables in-draw Hi-Z between overlapping tris — large win. Occluded draws skip sort (tiny near-depth prefix); mesh flat/textured skip sort (uniform/coplanar depth). No regressions beyond run-to-run noise on those paths.
 
 ## Reproduce
 
