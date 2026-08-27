@@ -32,7 +32,8 @@ Release flags: `-O3 -march=native -ffast-math` + OpenMP.
 |-------|--------|
 | `reference_render_tests` | **PASS** |
 | `headless_smoke_test` | **PASS** |
-| `ctest` (both) | **100% passed** |
+| `depth_wireframe_tests` | **PASS** (Layer 0 3D) |
+| `ctest` (all) | **100% passed** |
 
 ### Headless smoke (`./build/headless_smoke_test`)
 
@@ -80,7 +81,11 @@ startup_ms ≈ 1.25
 export HYPERLITE_HEADLESS=1
 ./build/reference_render_tests
 ./build/headless_smoke_test
+./build/depth_wireframe_tests
 ./build/cpu_line_bench
+./build/cpu_line_3d_bench
 ./build/primitive_bench
 ctest --test-dir build --output-on-failure
 ```
+
+3D wireframe numbers: [3d-wireframe-bench.md](3d-wireframe-bench.md).

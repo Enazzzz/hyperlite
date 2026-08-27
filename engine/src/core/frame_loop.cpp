@@ -1,8 +1,11 @@
 #include "engine/engine.hpp"
 
+#include "engine/cpu_line_raster_3d.hpp"
 #include "engine/rasterizer.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -85,7 +88,11 @@ void Engine::EndFrame() {
 	if (line_sort_threshold_ > 0 && !command_buffer_.LinesAlreadySorted()) {
 		command_buffer_.SortLineRunsByColor(line_sort_threshold_);
 	}
-	backend_->Render(command_buffer_, ActiveFramebuffer(), atlas_store_);
+	if (depth_enabled_ && IsCpuBackend()) {
+		raster::ExecuteCommandBuffer(command_buffer_, ActiveFramebuffer(), atlas_store_, ActiveDepth());
+	} else {
+		backend_->Render(command_buffer_, ActiveFramebuffer(), atlas_store_);
+	}
 }
 
 void Engine::UploadFrameRgba(const std::uint8_t* src, const std::size_t bytes) {
@@ -431,6 +438,120 @@ void Engine::LinesBulkColored(
 		static_cast<std::uint8_t>(clamped));
 }
 
+void Engine::EnableDepth(const bool enabled) {
+	if (enabled == depth_enabled_) {
+		if (enabled) {
+			const FrameBuffer& fb = ActiveFramebuffer();
+			if (!depth_buffer_.Allocated() ||
+				depth_buffer_.Width() != fb.Width() ||
+				depth_buffer_.Height() != fb.Height()) {
+				depth_buffer_.Resize(fb.Width(), fb.Height());
+			}
+		}
+		return;
+	}
+	depth_enabled_ = enabled;
+	if (enabled) {
+		const FrameBuffer& fb = ActiveFramebuffer();
+		depth_buffer_.Resize(fb.Width(), fb.Height());
+	} else {
+		depth_buffer_.Reset();
+	}
+}
+
+bool Engine::DepthEnabled() const {
+	return depth_enabled_;
+}
+
+void Engine::SetViewProj(const float* matrix16) {
+	if (matrix16 == nullptr) {
+		return;
+	}
+	std::memcpy(view_proj_.data(), matrix16, sizeof(float) * 16U);
+}
+
+DepthBuffer* Engine::ActiveDepth() {
+	return (depth_enabled_ && depth_buffer_.Allocated()) ? &depth_buffer_ : nullptr;
+}
+
+void Engine::FlushPending2d() {
+	if (command_buffer_.Size() == 0U) {
+		return;
+	}
+	if (blit_sort_threshold_ > 0) {
+		command_buffer_.SortBlitRunsByMaterial(blit_sort_threshold_);
+	}
+	if (line_sort_threshold_ > 0 && !command_buffer_.LinesAlreadySorted()) {
+		command_buffer_.SortLineRunsByColor(line_sort_threshold_);
+	}
+	if (depth_enabled_ && IsCpuBackend()) {
+		raster::ExecuteCommandBuffer(command_buffer_, ActiveFramebuffer(), atlas_store_, ActiveDepth());
+	} else {
+		backend_->Render(command_buffer_, ActiveFramebuffer(), atlas_store_);
+	}
+	command_buffer_.Reset();
+}
+
+int Engine::TickLines3d(
+	const std::uint32_t clear_packed,
+	const float* world_segs,
+	const std::size_t line_count,
+	const std::uint32_t line_packed,
+	const int line_width) {
+	PollEvents();
+	const auto raster_start = std::chrono::steady_clock::now();
+	raster::ClearAndRasterLines3dWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		clear_packed,
+		world_segs,
+		line_count,
+		line_packed,
+		line_width);
+	wireframe_raster_ms_ = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - raster_start).count());
+	Present();
+	return static_cast<int>(line_count);
+}
+
+void Engine::Lines3d(
+	const float* world_segs,
+	const std::size_t line_count,
+	const std::uint32_t line_packed,
+	const int line_width) {
+	FlushPending2d();
+	raster::RasterLines3dWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		world_segs,
+		line_count,
+		line_packed,
+		line_width);
+}
+
+void Engine::Lines3dScreen(
+	const float* screen_segs,
+	const std::size_t line_count,
+	const std::uint32_t line_packed,
+	const int line_width) {
+	FlushPending2d();
+	raster::RasterLines3dScreen(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		screen_segs,
+		line_count,
+		line_packed,
+		line_width);
+}
+
+float Engine::DepthAt(const int x, const int y) const {
+	if (!depth_enabled_ || !depth_buffer_.Allocated()) {
+		return 1.0f;
+	}
+	return depth_buffer_.At(x, y);
+}
+
 void Engine::PutPixelsBuffer(const std::int32_t* xy_pairs, const std::size_t count, const std::uint32_t packed_color) {
 	if (xy_pairs == nullptr || count == 0U) {
 		return;
@@ -659,6 +780,9 @@ void Engine::ApplyFramebufferResize(const int width, const int height) {
 		framebuffer_alt_.Resize(width, height);
 		cpu_frame_ = 0;
 		cpu_present_has_prev_ = false;
+	}
+	if (depth_enabled_) {
+		depth_buffer_.Resize(width, height);
 	}
 	backend_->EnsureSized(width, height);
 #ifdef _WIN32

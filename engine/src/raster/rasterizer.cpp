@@ -2,6 +2,7 @@
 
 #include "engine/cpu_blend.hpp"
 #include "engine/cpu_line_raster.hpp"
+#include "engine/depth_buffer.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -201,7 +202,11 @@ static bool LinesParallelSafe(const DrawCommand* commands, const std::size_t cou
 
 } // namespace
 
-void ExecuteCommandBuffer(const CommandBuffer& command_buffer, FrameBuffer& framebuffer, const AtlasStore& atlases) {
+void ExecuteCommandBuffer(
+	const CommandBuffer& command_buffer,
+	FrameBuffer& framebuffer,
+	const AtlasStore& atlases,
+	DepthBuffer* depth) {
 	framebuffer.ResetDirty();
 	const DrawCommand* commands = command_buffer.Data();
 	const std::size_t command_count = command_buffer.Size();
@@ -215,6 +220,9 @@ void ExecuteCommandBuffer(const CommandBuffer& command_buffer, FrameBuffer& fram
 				auto* ptr = reinterpret_cast<std::uint32_t*>(framebuffer.Data());
 				FillSpan(ptr, framebuffer.PixelCount(), packed_color);
 				framebuffer.NoteDirtyRect(0, 0, framebuffer.Width(), framebuffer.Height());
+				if (depth != nullptr && depth->Allocated()) {
+					depth->Clear(1.0f);
+				}
 			}
 			break;
 		case CommandType::kUploadFrame:

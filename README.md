@@ -34,7 +34,8 @@ HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(6
 Or: `bash scripts/install.sh`
 
 **Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
-**Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)
+**Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)  
+**3D wireframe (Layer 0):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md)
 
 ## What you get
 
@@ -73,6 +74,7 @@ Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRE
 | `python/examples/` | Demos and benchmarks |
 | `docs/guide.md` | **How-to guide** |
 | `docs/linux-bench.md` | Linux baseline numbers |
+| `docs/3d-plan.md` | 3D layer roadmap (wireframe → tris → mesh → GPU) |
 | `scripts/install.ps1` / `install.sh` | One-command local install |
 
 ## License
