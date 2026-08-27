@@ -640,6 +640,72 @@ inline int FillOpaqueFlatBlock8Vl(
 	_mm256_mask_storeu_epi32(reinterpret_cast<int*>(row_dst), cov, color_i);
 	return static_cast<int>(cov);
 }
+
+/**
+ * AVX-512VL: 8-wide opaque depth-only block (coverage + depth test/write, no color).
+ *
+ * When old_depth_out is non-null, stores pre-write depth values for alpha fixup on
+ * the scalar atlas sample path (a==0 / translucent texels revert speculative writes).
+ */
+inline int FillOpaqueDepthBlock8Vl(
+	float* row_depth,
+	const __m256 w0,
+	const __m256 w1,
+	const __m256 w2,
+	const __m256 z_win,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth,
+	float* old_depth_out) {
+	const __m256 zero = _mm256_setzero_ps();
+	const __mmask8 m0 =
+		tl0 ? _mm256_cmp_ps_mask(w0, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w0, zero, _CMP_GT_OQ);
+	const __mmask8 m1 =
+		tl1 ? _mm256_cmp_ps_mask(w1, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w1, zero, _CMP_GT_OQ);
+	const __mmask8 m2 =
+		tl2 ? _mm256_cmp_ps_mask(w2, zero, _CMP_GE_OQ) : _mm256_cmp_ps_mask(w2, zero, _CMP_GT_OQ);
+	__mmask8 cov = static_cast<__mmask8>(m0 & m1 & m2);
+	if (cov == 0) {
+		return 0;
+	}
+	if (has_depth && row_depth != nullptr) {
+		const __m256 d = _mm256_loadu_ps(row_depth);
+		if (old_depth_out != nullptr) {
+			_mm256_storeu_ps(old_depth_out, d);
+		}
+		const __mmask8 pass = _mm256_cmp_ps_mask(z_win, d, _CMP_LE_OQ);
+		cov = static_cast<__mmask8>(cov & pass);
+		if (cov == 0) {
+			return 0;
+		}
+		_mm256_mask_storeu_ps(row_depth, cov, z_win);
+	}
+	return static_cast<int>(cov);
+}
+
+/**
+ * AVX-512VL: 8-wide interior depth block (fully covered span; no edge compares).
+ */
+inline int FillInteriorDepthBlock8Vl(
+	float* row_depth,
+	const __m256 z_win,
+	const bool has_depth,
+	float* old_depth_out) {
+	if (!has_depth || row_depth == nullptr) {
+		return 0xFF;
+	}
+	const __m256 d = _mm256_loadu_ps(row_depth);
+	if (old_depth_out != nullptr) {
+		_mm256_storeu_ps(old_depth_out, d);
+	}
+	const __mmask8 pass = _mm256_cmp_ps_mask(z_win, d, _CMP_LE_OQ);
+	if (pass == 0) {
+		return 0;
+	}
+	_mm256_mask_storeu_ps(row_depth, pass, z_win);
+	return static_cast<int>(pass);
+}
 #endif // __AVX512F__ && __AVX512VL__
 
 #if defined(__AVX2__)
@@ -685,6 +751,73 @@ inline int FillOpaqueFlatBlock8(
 	}
 	_mm256_maskstore_epi32(reinterpret_cast<int*>(row_dst), store_mask, color_i);
 	return _mm256_movemask_ps(_mm256_castsi256_ps(store_mask));
+}
+
+/**
+ * AVX2: 8-wide opaque depth-only block (coverage + depth test/write, no color).
+ */
+inline int FillOpaqueDepthBlock8(
+	float* row_depth,
+	const __m256 w0,
+	const __m256 w1,
+	const __m256 w2,
+	const __m256 z_win,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth,
+	float* old_depth_out) {
+	const __m256 zero = _mm256_setzero_ps();
+	__m256 c0 = tl0 ? _mm256_cmp_ps(w0, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w0, zero, _CMP_GT_OQ);
+	__m256 c1 = tl1 ? _mm256_cmp_ps(w1, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w1, zero, _CMP_GT_OQ);
+	__m256 c2 = tl2 ? _mm256_cmp_ps(w2, zero, _CMP_GE_OQ) : _mm256_cmp_ps(w2, zero, _CMP_GT_OQ);
+	__m256 cov = _mm256_and_ps(_mm256_and_ps(c0, c1), c2);
+	int cov_bits = _mm256_movemask_ps(cov);
+	if (cov_bits == 0) {
+		return 0;
+	}
+
+	__m256i store_mask = _mm256_castps_si256(cov);
+	if (has_depth && row_depth != nullptr) {
+		const __m256 d = _mm256_loadu_ps(row_depth);
+		if (old_depth_out != nullptr) {
+			_mm256_storeu_ps(old_depth_out, d);
+		}
+		const __m256 pass = _mm256_cmp_ps(z_win, d, _CMP_LE_OQ);
+		const __m256 write = _mm256_and_ps(cov, pass);
+		store_mask = _mm256_castps_si256(write);
+		const int write_bits = _mm256_movemask_ps(write);
+		if (write_bits == 0) {
+			return 0;
+		}
+		_mm256_maskstore_ps(row_depth, store_mask, z_win);
+	}
+	return _mm256_movemask_ps(_mm256_castsi256_ps(store_mask));
+}
+
+/**
+ * AVX2: 8-wide interior depth block (fully covered span; no edge compares).
+ */
+inline int FillInteriorDepthBlock8(
+	float* row_depth,
+	const __m256 z_win,
+	const bool has_depth,
+	float* old_depth_out) {
+	if (!has_depth || row_depth == nullptr) {
+		return 0xFF;
+	}
+	const __m256 d = _mm256_loadu_ps(row_depth);
+	if (old_depth_out != nullptr) {
+		_mm256_storeu_ps(old_depth_out, d);
+	}
+	const __m256 pass = _mm256_cmp_ps(z_win, d, _CMP_LE_OQ);
+	const __m256i store_mask = _mm256_castps_si256(pass);
+	const int write_bits = _mm256_movemask_ps(pass);
+	if (write_bits == 0) {
+		return 0;
+	}
+	_mm256_maskstore_ps(row_depth, store_mask, z_win);
+	return write_bits;
 }
 #elif defined(__SSE4_2__)
 /**
@@ -743,7 +876,177 @@ inline int FillOpaqueFlatBlock4(
 	}
 	return write_bits;
 }
+
+/**
+ * SSE4.2: 4-wide opaque depth-only block (coverage + depth test/write, no color).
+ */
+inline int FillOpaqueDepthBlock4(
+	float* row_depth,
+	const __m128 w0,
+	const __m128 w1,
+	const __m128 w2,
+	const __m128 z_win,
+	const bool tl0,
+	const bool tl1,
+	const bool tl2,
+	const bool has_depth,
+	float* old_depth_out) {
+	const __m128 zero = _mm_setzero_ps();
+	__m128 c0 = tl0 ? _mm_cmpge_ps(w0, zero) : _mm_cmpgt_ps(w0, zero);
+	__m128 c1 = tl1 ? _mm_cmpge_ps(w1, zero) : _mm_cmpgt_ps(w1, zero);
+	__m128 c2 = tl2 ? _mm_cmpge_ps(w2, zero) : _mm_cmpgt_ps(w2, zero);
+	__m128 cov = _mm_and_ps(_mm_and_ps(c0, c1), c2);
+	int cov_bits = _mm_movemask_ps(cov);
+	if (cov_bits == 0) {
+		return 0;
+	}
+
+	__m128 write = cov;
+	if (has_depth && row_depth != nullptr) {
+		const __m128 d = _mm_loadu_ps(row_depth);
+		if (old_depth_out != nullptr) {
+			_mm_storeu_ps(old_depth_out, d);
+		}
+		const __m128 pass = _mm_cmple_ps(z_win, d);
+		write = _mm_and_ps(cov, pass);
+		const int write_bits = _mm_movemask_ps(write);
+		if (write_bits == 0) {
+			return 0;
+		}
+		alignas(16) float z_tmp[4];
+		alignas(16) float d_tmp[4];
+		_mm_store_ps(z_tmp, z_win);
+		_mm_store_ps(d_tmp, d);
+		for (int i = 0; i < 4; ++i) {
+			if ((write_bits & (1 << i)) != 0) {
+				d_tmp[i] = z_tmp[i];
+			}
+		}
+		_mm_storeu_ps(row_depth, _mm_load_ps(d_tmp));
+	}
+	return _mm_movemask_ps(write);
+}
+
+/**
+ * SSE4.2: 4-wide interior depth block (fully covered span; no edge compares).
+ */
+inline int FillInteriorDepthBlock4(
+	float* row_depth,
+	const __m128 z_win,
+	const bool has_depth,
+	float* old_depth_out) {
+	if (!has_depth || row_depth == nullptr) {
+		return 0xF;
+	}
+	const __m128 d = _mm_loadu_ps(row_depth);
+	if (old_depth_out != nullptr) {
+		_mm_storeu_ps(old_depth_out, d);
+	}
+	const __m128 pass = _mm_cmple_ps(z_win, d);
+	const int write_bits = _mm_movemask_ps(pass);
+	if (write_bits == 0) {
+		return 0;
+	}
+	alignas(16) float z_tmp[4];
+	alignas(16) float d_tmp[4];
+	_mm_store_ps(z_tmp, z_win);
+	_mm_store_ps(d_tmp, d);
+	for (int i = 0; i < 4; ++i) {
+		if ((write_bits & (1 << i)) != 0) {
+			d_tmp[i] = z_tmp[i];
+		}
+	}
+	_mm_storeu_ps(row_depth, _mm_load_ps(d_tmp));
+	return write_bits;
+}
 #endif
+
+/**
+ * Scalar atlas sample + color store for SIMD depth-passed textured lanes.
+ *
+ * Depth is written speculatively by the SIMD block; a==0 / translucent texels revert
+ * and follow the same depth/color rules as the all-scalar textured path.
+ */
+inline void ProcessTexturedPassedLanes(
+	std::uint32_t* row_dst,
+	float* row_depth,
+	const int x0,
+	const int y,
+	const int pass_mask,
+	const int lane_count,
+	const float* old_depth,
+	float iw,
+	const float diw_dx,
+	float uw,
+	const float duw_dx,
+	float vw,
+	const float dvw_dx,
+	float z_win,
+	const float dz_win_dx,
+	const ScreenTri& tri,
+	const bool has_depth,
+	bool& touched,
+	int& dirty_x0,
+	int& dirty_y0,
+	int& dirty_x1,
+	int& dirty_y1,
+	float& write_max) {
+	if (pass_mask == 0) {
+		return;
+	}
+	float liw = iw;
+	float luw = uw;
+	float lvw = vw;
+	float lz = z_win;
+	for (int lane = 0; lane < lane_count; ++lane) {
+		if ((pass_mask & (1 << lane)) != 0) {
+			const int x = x0 + lane;
+			if (std::fabs(liw) >= 1e-20f) {
+				const std::uint32_t packed = SampleAtlasNearest(
+					tri.atlas_rgba, tri.atlas_w, tri.atlas_h, luw / liw, lvw / liw);
+				const std::uint32_t sa = packed >> 24U;
+				if (sa != 0U) {
+					const bool opaque = sa == 255U;
+					if (opaque) {
+						row_dst[x] = packed;
+						if (has_depth) {
+							AccumulateDepthWriteMax(write_max, lz);
+						}
+						touched = true;
+						dirty_x0 = std::min(dirty_x0, x);
+						dirty_y0 = std::min(dirty_y0, y);
+						dirty_x1 = std::max(dirty_x1, x);
+						dirty_y1 = std::max(dirty_y1, y);
+					} else {
+						if (has_depth && old_depth != nullptr) {
+							row_depth[x] = old_depth[lane];
+						}
+						bool pass = true;
+						if (has_depth && lz > row_depth[x]) {
+							pass = false;
+						}
+						if (pass) {
+							StorePixel(row_dst + x, packed);
+							touched = true;
+							dirty_x0 = std::min(dirty_x0, x);
+							dirty_y0 = std::min(dirty_y0, y);
+							dirty_x1 = std::max(dirty_x1, x);
+							dirty_y1 = std::max(dirty_y1, y);
+						}
+					}
+				} else if (has_depth && old_depth != nullptr) {
+					row_depth[x] = old_depth[lane];
+				}
+			} else if (has_depth && old_depth != nullptr) {
+				row_depth[x] = old_depth[lane];
+			}
+		}
+		liw += diw_dx;
+		luw += duw_dx;
+		lvw += dvw_dx;
+		lz += dz_win_dx;
+	}
+}
 
 /**
  * Expand dirty AABB from a block write bitmask starting at pixel x.
@@ -787,7 +1090,8 @@ inline void ExpandDirtyFromMask(
  *
  * Hot path: incremental edge/attribute setup, trivial tile reject vs half-planes,
  * then opaque flat blocks: AVX-512VL 8-wide k-masks when available, else AVX2 /
- * SSE4.2, with scalar remainder. Textured stays scalar (gather SIMD lost here).
+ * SSE4.2, with scalar remainder. Textured opaque: same SIMD coverage + depth blocks,
+ * scalar nearest atlas sample per passed lane (gather SIMD still not used).
  *
  * Returns true when at least one pixel was written.
  *
@@ -1118,7 +1422,7 @@ inline bool RasterScreenTriTile(
 			z_win_row += dz_win_dy;
 		}
 	} else if (textured) {
-		// Textured: incremental barycentrics + u/w,v/w,1/w; opaque texels use fast depth write.
+		// Textured: SIMD coverage + depth (same blocks as opaque flat), scalar nearest atlas sample.
 		const float db0_dx = e0.a * inv_area;
 		const float db1_dx = e1.a * inv_area;
 		const float db2_dx = e2.a * inv_area;
@@ -1137,6 +1441,30 @@ inline bool RasterScreenTriTile(
 		float iw_row = b0_row * tri.iw0 + b1_row * tri.iw1 + b2_row * tri.iw2;
 		float uw_row = b0_row * uw0 + b1_row * uw1 + b2_row * uw2;
 		float vw_row = b0_row * vw0 + b1_row * vw1 + b2_row * vw2;
+
+#if defined(__AVX2__)
+		const __m256 a0_v = _mm256_set1_ps(e0.a);
+		const __m256 a1_v = _mm256_set1_ps(e1.a);
+		const __m256 a2_v = _mm256_set1_ps(e2.a);
+		const __m256 dz_dx_v = _mm256_set1_ps(dz_win_dx);
+		const __m256 lane = _mm256_setr_ps(0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f);
+		const __m256 a0_lane = _mm256_mul_ps(a0_v, lane);
+		const __m256 a1_lane = _mm256_mul_ps(a1_v, lane);
+		const __m256 a2_lane = _mm256_mul_ps(a2_v, lane);
+		const __m256 dz_lane = _mm256_mul_ps(dz_dx_v, lane);
+		constexpr int kBlock = 8;
+#elif defined(__SSE4_2__)
+		const __m128 a0_v = _mm_set1_ps(e0.a);
+		const __m128 a1_v = _mm_set1_ps(e1.a);
+		const __m128 a2_v = _mm_set1_ps(e2.a);
+		const __m128 dz_dx_v = _mm_set1_ps(dz_win_dx);
+		const __m128 lane = _mm_setr_ps(0.0f, 1.0f, 2.0f, 3.0f);
+		const __m128 a0_lane = _mm_mul_ps(a0_v, lane);
+		const __m128 a1_lane = _mm_mul_ps(a1_v, lane);
+		const __m128 a2_lane = _mm_mul_ps(a2_v, lane);
+		const __m128 dz_lane = _mm_mul_ps(dz_dx_v, lane);
+		constexpr int kBlock = 4;
+#endif
 
 		for (int y = iy0; y < iy1; ++y) {
 			if (tile_depth_reject &&
@@ -1160,7 +1488,211 @@ inline bool RasterScreenTriTile(
 			std::uint32_t* row_dst = dst + static_cast<std::size_t>(y) * stride;
 			float* row_depth = has_depth ? (depth_base + static_cast<std::size_t>(y) * stride) : nullptr;
 
-			for (int x = ix0; x < ix1; ++x) {
+			int x = ix0;
+#if defined(__AVX2__) || defined(__SSE4_2__)
+			if (box_fully_covered) {
+				for (; x + kBlock <= ix1; x += kBlock) {
+					if (tile_depth_reject &&
+						DepthSpanBehindOccluder(z_win, dz_win_dx, kBlock, tile_occluder_max)) {
+						z_win += dz_win_dx * static_cast<float>(kBlock);
+						iw += diw_dx * static_cast<float>(kBlock);
+						uw += duw_dx * static_cast<float>(kBlock);
+						vw += dvw_dx * static_cast<float>(kBlock);
+						continue;
+					}
+#if defined(__AVX2__)
+					alignas(32) float old_depth[8];
+					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
+					const int passed = FillInteriorDepthBlock8(
+						has_depth ? (row_depth + x) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
+					if (passed != 0) {
+						ProcessTexturedPassedLanes(
+							row_dst,
+							row_depth,
+							x,
+							y,
+							passed,
+							kBlock,
+							has_depth ? old_depth : nullptr,
+							iw,
+							diw_dx,
+							uw,
+							duw_dx,
+							vw,
+							dvw_dx,
+							z_win,
+							dz_win_dx,
+							tri,
+							has_depth,
+							touched,
+							dirty_x0,
+							dirty_y0,
+							dirty_x1,
+							dirty_y1,
+							write_max);
+					}
+#elif defined(__SSE4_2__)
+					alignas(16) float old_depth[4];
+					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
+					const int passed = FillInteriorDepthBlock4(
+						has_depth ? (row_depth + x) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
+					if (passed != 0) {
+						ProcessTexturedPassedLanes(
+							row_dst,
+							row_depth,
+							x,
+							y,
+							passed,
+							kBlock,
+							has_depth ? old_depth : nullptr,
+							iw,
+							diw_dx,
+							uw,
+							duw_dx,
+							vw,
+							dvw_dx,
+							z_win,
+							dz_win_dx,
+							tri,
+							has_depth,
+							touched,
+							dirty_x0,
+							dirty_y0,
+							dirty_x1,
+							dirty_y1,
+							write_max);
+					}
+#endif
+					z_win += dz_win_dx * static_cast<float>(kBlock);
+					iw += diw_dx * static_cast<float>(kBlock);
+					uw += duw_dx * static_cast<float>(kBlock);
+					vw += dvw_dx * static_cast<float>(kBlock);
+				}
+			} else {
+				for (; x + kBlock <= ix1; x += kBlock) {
+					if (tile_depth_reject &&
+						DepthSpanBehindOccluder(z_win, dz_win_dx, kBlock, tile_occluder_max)) {
+						w0 += e0.a * static_cast<float>(kBlock);
+						w1 += e1.a * static_cast<float>(kBlock);
+						w2 += e2.a * static_cast<float>(kBlock);
+						z_win += dz_win_dx * static_cast<float>(kBlock);
+						iw += diw_dx * static_cast<float>(kBlock);
+						uw += duw_dx * static_cast<float>(kBlock);
+						vw += dvw_dx * static_cast<float>(kBlock);
+						continue;
+					}
+#if defined(__AVX2__)
+					alignas(32) float old_depth[8];
+					const __m256 w0v = _mm256_add_ps(_mm256_set1_ps(w0), a0_lane);
+					const __m256 w1v = _mm256_add_ps(_mm256_set1_ps(w1), a1_lane);
+					const __m256 w2v = _mm256_add_ps(_mm256_set1_ps(w2), a2_lane);
+					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+					const int passed = FillOpaqueDepthBlock8Vl(
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth,
+						has_depth ? old_depth : nullptr);
+#else
+					const int passed = FillOpaqueDepthBlock8(
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth,
+						has_depth ? old_depth : nullptr);
+#endif
+					if (passed != 0) {
+						ProcessTexturedPassedLanes(
+							row_dst,
+							row_depth,
+							x,
+							y,
+							passed,
+							kBlock,
+							has_depth ? old_depth : nullptr,
+							iw,
+							diw_dx,
+							uw,
+							duw_dx,
+							vw,
+							dvw_dx,
+							z_win,
+							dz_win_dx,
+							tri,
+							has_depth,
+							touched,
+							dirty_x0,
+							dirty_y0,
+							dirty_x1,
+							dirty_y1,
+							write_max);
+					}
+#elif defined(__SSE4_2__)
+					alignas(16) float old_depth[4];
+					const __m128 w0v = _mm_add_ps(_mm_set1_ps(w0), a0_lane);
+					const __m128 w1v = _mm_add_ps(_mm_set1_ps(w1), a1_lane);
+					const __m128 w2v = _mm_add_ps(_mm_set1_ps(w2), a2_lane);
+					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
+					const int passed = FillOpaqueDepthBlock4(
+						has_depth ? (row_depth + x) : nullptr,
+						w0v,
+						w1v,
+						w2v,
+						zv,
+						e0.top_left,
+						e1.top_left,
+						e2.top_left,
+						has_depth,
+						has_depth ? old_depth : nullptr);
+					if (passed != 0) {
+						ProcessTexturedPassedLanes(
+							row_dst,
+							row_depth,
+							x,
+							y,
+							passed,
+							kBlock,
+							has_depth ? old_depth : nullptr,
+							iw,
+							diw_dx,
+							uw,
+							duw_dx,
+							vw,
+							dvw_dx,
+							z_win,
+							dz_win_dx,
+							tri,
+							has_depth,
+							touched,
+							dirty_x0,
+							dirty_y0,
+							dirty_x1,
+							dirty_y1,
+							write_max);
+					}
+#endif
+					w0 += e0.a * static_cast<float>(kBlock);
+					w1 += e1.a * static_cast<float>(kBlock);
+					w2 += e2.a * static_cast<float>(kBlock);
+					z_win += dz_win_dx * static_cast<float>(kBlock);
+					iw += diw_dx * static_cast<float>(kBlock);
+					uw += duw_dx * static_cast<float>(kBlock);
+					vw += dvw_dx * static_cast<float>(kBlock);
+				}
+			}
+#endif
+			for (; x < ix1; ++x) {
 				const bool cover = box_fully_covered ||
 					(InsideHalfEdge(w0, e0.top_left) && InsideHalfEdge(w1, e1.top_left) &&
 						InsideHalfEdge(w2, e2.top_left));
