@@ -1366,6 +1366,10 @@ struct MeshDrawScratch {
 	std::vector<std::vector<std::uint32_t>> bins{};
 	/** Per-tile max stored window depth for Hi-Z reject (size = tile_count, reset each draw). */
 	std::vector<float> tile_max_depth{};
+	/** Front-to-back permutation into `screen` / draw tri list (reused each RasterScreenTrisTiled). */
+	std::vector<std::uint32_t> tri_order{};
+	/** Cached min window depth per tri (parallel to tri_order / draw list). */
+	std::vector<float> tri_min_depth{};
 };
 
 /**
@@ -1636,14 +1640,78 @@ inline void EmitScreenTri(
 }
 
 /**
- * Bin screen tris into 64×64 tiles and raster (OpenMP over tiles — each tile owns pixels).
+ * True when front-to-back reorder is worth the sort cost before bin/fill.
+ *
+ * Skips uniform-depth draws (flat mesh) and draws with a tiny near-depth prefix
+ * (fullscreen occluder + back field — already submission-ordered nearest-first).
+ */
+inline bool ShouldSortTrisFrontToBack(
+	const std::size_t tri_count,
+	const std::vector<float>& tri_min_depth) {
+	if (tri_count <= 1U || tri_min_depth.size() != tri_count) {
+		return false;
+	}
+	float depth_min = tri_min_depth[0];
+	float depth_max = tri_min_depth[0];
+	for (std::size_t i = 1U; i < tri_count; ++i) {
+		const float d = tri_min_depth[i];
+		depth_min = std::min(depth_min, d);
+		depth_max = std::max(depth_max, d);
+	}
+	constexpr float kUniformDepthEps = 1e-5f;
+	if (depth_max - depth_min <= kUniformDepthEps) {
+		return false;
+	}
+	constexpr float kNearMinDepthEps = 1e-5f;
+	constexpr std::size_t kOccluderNearMinMax = 4U;
+	int near_min_count = 0;
+	for (std::size_t i = 0U; i < tri_count; ++i) {
+		if (tri_min_depth[i] <= depth_min + kNearMinDepthEps) {
+			++near_min_count;
+		}
+	}
+	if (near_min_count <= static_cast<int>(kOccluderNearMinMax) && tri_count >= 64U) {
+		return false;
+	}
+	// Coplanar layers (flat mesh): most tris share the same min depth — sort cannot help Hi-Z.
+	if (static_cast<std::size_t>(near_min_count) * 4U > tri_count) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Cheap uniform-depth probe on a few tris (flat mesh skips full min-depth pass).
+ */
+inline bool TrisLookUniformDepthSample(const std::vector<ScreenTri>& tris) {
+	const std::size_t tri_count = tris.size();
+	if (tri_count <= 1U) {
+		return true;
+	}
+	constexpr std::size_t kSamples = 8U;
+	const std::size_t sample_count = std::min(tri_count, kSamples);
+	float depth_min = TriMinWindowDepthVertices(tris[0]);
+	float depth_max = depth_min;
+	for (std::size_t s = 1U; s < sample_count; ++s) {
+		const std::size_t idx = (s * (tri_count - 1U)) / (sample_count - 1U);
+		const float d = TriMinWindowDepthVertices(tris[idx]);
+		depth_min = std::min(depth_min, d);
+		depth_max = std::max(depth_max, d);
+	}
+	constexpr float kUniformDepthEps = 1e-5f;
+	return depth_max - depth_min <= kUniformDepthEps;
+}
+
+/**
  *
  * Reuses thread-local bin vectors across calls (clear, keep capacity). AABB uses nested
  * min/max (no initializer_list). No per-pixel work in the bin pass.
  *
  * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
  * behind that occluder skip the pixel loop. tile_max advances from write tracking (no
- * per-triangle 64×64 depth rescan).
+ * per-triangle 64×64 depth rescan). When depth is on and the draw has meaningful
+ * overlap depth variation (not uniform-depth mesh, not occluder-prefix), tris are
+ * sorted front-to-back before binning so nearer surfaces update tile_max first.
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -1679,10 +1747,36 @@ inline void RasterScreenTrisTiled(
 
 	const bool depth_on = depth != nullptr && depth->Allocated();
 	constexpr float kHiZFarDepth = 1.0f - 1e-6f;
+	const std::size_t tri_count = tris.size();
+
+	// Front-to-back bin order when Hi-Z can reject overlapping farther tris in-draw.
+	auto& tri_order = scratch.tri_order;
+	auto& tri_min_depth = scratch.tri_min_depth;
+	if (tri_order.size() != tri_count) {
+		tri_order.resize(tri_count);
+	}
+	if (tri_min_depth.size() != tri_count) {
+		tri_min_depth.resize(tri_count);
+	}
+	for (std::size_t i = 0U; i < tri_count; ++i) {
+		tri_order[i] = static_cast<std::uint32_t>(i);
+	}
+	bool sort_front_to_back = false;
+	if (depth_on && tri_count > 1U && !TrisLookUniformDepthSample(tris)) {
+		for (std::size_t i = 0U; i < tri_count; ++i) {
+			tri_min_depth[i] = TriMinWindowDepthVertices(tris[i]);
+		}
+		sort_front_to_back = ShouldSortTrisFrontToBack(tri_count, tri_min_depth);
+	}
+	if (sort_front_to_back) {
+		std::sort(tri_order.begin(), tri_order.end(), [&tri_min_depth](const std::uint32_t a, const std::uint32_t b) {
+			return tri_min_depth[a] < tri_min_depth[b];
+		});
+	}
 
 	PixelBounds global_bounds{};
 
-	for (std::uint32_t ti = 0U; ti < static_cast<std::uint32_t>(tris.size()); ++ti) {
+	for (const std::uint32_t ti : tri_order) {
 		const ScreenTri& t = tris[ti];
 		const float min_x = std::min(t.x0, std::min(t.x1, t.x2));
 		const float min_y = std::min(t.y0, std::min(t.y1, t.y2));
