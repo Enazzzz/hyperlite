@@ -1,7 +1,7 @@
 # Hyperlite 3D plan
 
 NULLLIGHT-style wireframe FPS needs project + clip + depth-tested lines first — not a scene graph.
-This document locks the four-layer roadmap. **Layers 0–2 are shipped.**
+This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 
 ## Layer 0 — Depth-tested wireframe (shipped)
 
@@ -28,20 +28,33 @@ This document locks the four-layer roadmap. **Layers 0–2 are shipped.**
 - Perspective-correct depth: interpolate `z/w` (and `1/w`) in screen space
 - Portable CPU (scalar; optional AVX2 only via existing blend helpers when the arch enables it)
 
-## Layer 2 — Retained meshes (shipped here)
+## Layer 2 — Retained meshes (shipped)
 
 - `load_mesh` / `draw_mesh` / `tick_mesh` — CPU-resident MeshStore (AtlasStore pattern)
 - Vertex layout v1: **6 float32/vert** — `x, y, z, u, v, _pad`; indices `uint32` (optional triangle list)
 - Draw: `MVP = view_proj * model`, then existing Layer 1 clip + tiled half-space raster (honors depth + `set_cull_backfaces`)
-- UVs stored for a future textured path; **flat-color only in this PR** (`draw_mesh_textured` deferred to Layer 2.1)
 - Immediate `tris_3d` unchanged for dynamic geometry
 - See [3d-meshes.md](3d-meshes.md) and [3d-mesh-bench.md](3d-mesh-bench.md)
 
-## Layer 3 — Portable GPU
+## Layer 2.1 — Textured retained meshes (shipped)
 
-- CPU remains the default and correctness path
-- CUDA fast path where available
-- Vulkan (or similar) for cross-vendor GPU later
+- `draw_mesh_textured(mesh, model, atlas)` / optional `tick_mesh_textured` — same mesh layout, samples `load_atlas` RGBA
+- Perspective-correct UV during the **existing** tiled half-space fill (`u/w`, `v/w`, `1/w`); no second rasterizer
+- UV **0..1 over the full atlas** (not a sprite subrect); **clamp**; **nearest** sample (v1 fast path)
+- Alpha: `a==255` opaque + depth write; `a<255` src-over + no depth write; `a==0` skip pixel (same Layer 1 rule)
+- Flat `draw_mesh` unchanged; invalid mesh/atlas handles are no-ops
+- See [3d-meshes.md](3d-meshes.md)
+
+## Further speed (not a second renderer)
+
+Hyperlite’s renderer **owns all pixels**. Present is a **copy** of our RGBA8 (+ depth) into the window via the existing blit path (DXGI / X11 / GDI) — not a second rasterizer.
+
+Further speedups stay inside that ownership model:
+
+- **(a)** More CPU SIMD / tiling in *our* raster
+- **(b)** Optional CUDA (or similar **compute**) kernels that write the **same** RGBA8 + depth framebuffer Hyperlite already owns, then present those bytes through the existing window blit
+
+**Out of scope forever as a graphics backend:** Vulkan, OpenGL, D3D, Metal, or any API that takes over rasterization / owns the swapchain as the renderer. Compute that fills Hyperlite’s buffers is fine; a second GPU graphics pipeline is not.
 
 ## Non-goals (v1)
 
@@ -50,6 +63,7 @@ This document locks the four-layer roadmap. **Layers 0–2 are shipped.**
 - PBR / material system
 - Custom shader language
 - Skeletal animation
+- Vulkan / OpenGL / D3D / Metal (or any graphics API that replaces our raster)
 
 ## API sketch (Python)
 
@@ -70,6 +84,11 @@ mesh = engine.load_mesh(verts_xyz_uv_pad, indices_uint32)
 engine.draw_mesh(mesh, model16, r, g, b, a=255)
 engine.tick_mesh(mesh, model16, cr, cg, cb, ca, r, g, b, a=255)
 
+# Textured retained mesh (Layer 2.1)
+atlas = engine.load_atlas(rgba, w, h)
+engine.draw_mesh_textured(mesh, model16, atlas)
+engine.tick_mesh_textured(mesh, model16, atlas, cr, cg, cb, ca)
+
 # Fused world-space wireframe (Layer 0)
 engine.tick_lines_3d(world_segs, cr, cg, cb, ca, r, g, b, a=255, width=1)
 
@@ -78,6 +97,7 @@ engine.begin_frame()
 engine.clear(...)
 engine.tris_3d(world_tris, r, g, b, a)
 engine.draw_mesh(mesh, model16, r, g, b, a)
+engine.draw_mesh_textured(mesh, model16, atlas)
 engine.rect_fill(...)  # HUD, no depth
 engine.tick()
 ```

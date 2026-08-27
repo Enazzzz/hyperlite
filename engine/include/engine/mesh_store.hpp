@@ -10,7 +10,7 @@ namespace hyperlite {
  * CPU-resident mesh: tightly packed positions + UVs, optional index buffer.
  *
  * Vertex layout (v1): 6 float32 per vertex — x, y, z, u, v, _pad.
- * UVs are stored for a future textured draw path; flat-color draw ignores them.
+ * UVs are 0..1 over the full atlas for draw_mesh_textured; flat draw_mesh ignores them.
  * Empty indices means a triangle list (vertex_count must be a multiple of 3).
  */
 struct MeshEntry {

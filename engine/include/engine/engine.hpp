@@ -321,6 +321,23 @@ public:
 		std::uint32_t tri_packed);
 
 	/**
+	 * Draw a loaded mesh textured from an atlas (Layer 2.1).
+	 *
+	 * Samples atlas with perspective-correct UVs (nearest, clamp to [0,1] over the
+	 * full atlas). Invalid mesh or atlas handle is a no-op. Honors depth + cull.
+	 */
+	void DrawMeshTextured(int mesh_id, const float* model16, int atlas_id);
+
+	/**
+	 * Fused poll + clear color/depth + draw_mesh_textured + present.
+	 */
+	int TickMeshTextured(
+		std::uint32_t clear_packed,
+		int mesh_id,
+		const float* model16,
+		int atlas_id);
+
+	/**
 	 * Queue many put-pixel commands from interleaved int32 x,y pairs.
 	 */
 	void PutPixelsBuffer(const std::int32_t* xy_pairs, std::size_t count, std::uint32_t packed_color);
