@@ -635,6 +635,36 @@ void Engine::DrawMesh(const int mesh_id, const float* model16, const std::uint32
 		cull_backfaces_);
 }
 
+void Engine::DrawMeshMany(
+	const int mesh_id,
+	const float* models16,
+	const std::size_t instance_count,
+	const std::uint32_t tri_packed) {
+	const MeshEntry* mesh = mesh_store_.Get(mesh_id);
+	if (mesh == nullptr || models16 == nullptr || instance_count == 0U) {
+		return;
+	}
+	FlushPending2d();
+	const std::uint32_t* indices = mesh->indices.empty() ? nullptr : mesh->indices.data();
+	const std::size_t index_count = mesh->indices.size();
+	if (instance_count == 1U) {
+		DrawMesh(mesh_id, models16, tri_packed);
+		return;
+	}
+	raster::RasterMeshWorldMany(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		models16,
+		instance_count,
+		mesh->positions.data(),
+		mesh->vertex_count,
+		indices,
+		index_count,
+		tri_packed,
+		cull_backfaces_);
+}
+
 int Engine::TickMesh(
 	const std::uint32_t clear_packed,
 	const int mesh_id,
@@ -686,6 +716,43 @@ void Engine::DrawMeshTextured(const int mesh_id, const float* model16, const int
 		ActiveFramebuffer(),
 		ActiveDepth(),
 		mvp,
+		mesh->positions.data(),
+		mesh->uvs.data(),
+		mesh->vertex_count,
+		indices,
+		index_count,
+		atlas->pixels.data(),
+		atlas->width,
+		atlas->height,
+		cull_backfaces_);
+}
+
+void Engine::DrawMeshTexturedMany(
+	const int mesh_id,
+	const float* models16,
+	const std::size_t instance_count,
+	const int atlas_id) {
+	const MeshEntry* mesh = mesh_store_.Get(mesh_id);
+	const AtlasEntry* atlas = atlas_store_.Get(atlas_id);
+	if (mesh == nullptr || atlas == nullptr || models16 == nullptr || instance_count == 0U) {
+		return;
+	}
+	if (atlas->width <= 0 || atlas->height <= 0 || atlas->pixels.empty()) {
+		return;
+	}
+	FlushPending2d();
+	const std::uint32_t* indices = mesh->indices.empty() ? nullptr : mesh->indices.data();
+	const std::size_t index_count = mesh->indices.size();
+	if (instance_count == 1U) {
+		DrawMeshTextured(mesh_id, models16, atlas_id);
+		return;
+	}
+	raster::RasterMeshTexturedWorldMany(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		models16,
+		instance_count,
 		mesh->positions.data(),
 		mesh->uvs.data(),
 		mesh->vertex_count,

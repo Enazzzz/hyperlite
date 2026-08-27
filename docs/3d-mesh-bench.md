@@ -70,4 +70,7 @@ ctest --test-dir build --output-on-failure
 ./build/cpu_mesh_bench          # flat then textured
 ./build/cpu_mesh_bench flat     # flat only
 ./build/cpu_mesh_bench textured # textured only
+./build/cpu_mesh_bench instanced # 128× same mesh via DrawMeshMany (flat)
 ```
+
+Single-instance `flat` / `textured` paths are unchanged. See [mesh-instances.md](mesh-instances.md) for the batched API and `proc_world` before/after.

@@ -1735,28 +1735,25 @@ inline void MulMat4ColumnMajor(const float* a, const float* b, float* out) {
 }
 
 /**
- * Raster a retained mesh: positions (xyz) + optional indices through MVP into the tiled path.
+ * Transform + clip-emit flat mesh tris into an existing screen list (append, no tile fill).
  *
- * mvp16 = view_proj * model (column-major). Empty indices (index_count == 0) means a triangle
- * list over positions. Transforms each unique vertex once (AVX2 gather when available), then
- * outcode accept/reject + project-once for fully-visible verts. Reuses RasterScreenTrisTiled.
+ * Reuses MeshDrawScratch clip/project buffers; caller must bin/fill after all instances.
  */
-inline void RasterMeshWorld(
-	FrameBuffer& framebuffer,
-	DepthBuffer* depth,
+inline void AppendFlatMeshTris(
+	std::vector<detail3d::ScreenTri>& screen,
+	detail3d::MeshDrawScratch& scratch,
 	const float* mvp16,
 	const float* positions,
 	const std::size_t vertex_count,
 	const std::uint32_t* indices,
 	const std::size_t index_count,
 	const std::uint32_t tri_color,
-	const bool cull_backfaces) {
+	const bool cull_backfaces,
+	const int width,
+	const int height) {
 	if (positions == nullptr || mvp16 == nullptr || vertex_count < 3U) {
 		return;
 	}
-	const int width = framebuffer.Width();
-	const int height = framebuffer.Height();
-	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
 	scratch.clip_verts.resize(vertex_count);
 	scratch.outcodes.resize(vertex_count);
 	scratch.px.resize(vertex_count);
@@ -1775,9 +1772,6 @@ inline void RasterMeshWorld(
 		scratch.iw.data(),
 		width,
 		height);
-
-	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
-	screen.clear();
 
 	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
 		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
@@ -1811,18 +1805,212 @@ inline void RasterMeshWorld(
 
 	if (index_count > 0U && indices != nullptr) {
 		const std::size_t tri_count = index_count / 3U;
-		screen.reserve(tri_count);
+		screen.reserve(screen.size() + tri_count);
 		for (std::size_t t = 0U; t < tri_count; ++t) {
 			const std::size_t base = t * 3U;
 			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
 		}
 	} else {
 		const std::size_t tri_count = vertex_count / 3U;
-		screen.reserve(tri_count);
+		screen.reserve(screen.size() + tri_count);
 		for (std::size_t t = 0U; t < tri_count; ++t) {
 			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
 			emit_indexed(i0, i0 + 1U, i0 + 2U);
 		}
+	}
+}
+
+/**
+ * Transform + clip-emit textured mesh tris into an existing screen list (append, no tile fill).
+ */
+inline void AppendTexturedMeshTris(
+	std::vector<detail3d::ScreenTri>& screen,
+	detail3d::MeshDrawScratch& scratch,
+	const float* mvp16,
+	const float* positions,
+	const float* uvs,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint8_t* atlas_rgba,
+	const int atlas_w,
+	const int atlas_h,
+	const bool cull_backfaces,
+	const int width,
+	const int height) {
+	if (positions == nullptr || uvs == nullptr || mvp16 == nullptr || vertex_count < 3U) {
+		return;
+	}
+	if (atlas_rgba == nullptr || atlas_w <= 0 || atlas_h <= 0) {
+		return;
+	}
+	scratch.clip_verts.resize(vertex_count);
+	scratch.outcodes.resize(vertex_count);
+	scratch.px.resize(vertex_count);
+	scratch.py.resize(vertex_count);
+	scratch.zw.resize(vertex_count);
+	scratch.iw.resize(vertex_count);
+	detail3d::TransformMeshPositions(
+		mvp16,
+		positions,
+		vertex_count,
+		scratch.clip_verts.data(),
+		scratch.outcodes.data(),
+		scratch.px.data(),
+		scratch.py.data(),
+		scratch.zw.data(),
+		scratch.iw.data(),
+		width,
+		height);
+
+	constexpr std::uint32_t kUnusedFlat = 0xFFFFFFFFU;
+
+	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
+		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
+			return;
+		}
+		const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
+		const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
+		const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
+		detail3d::EmitIndexedClipTri(
+			screen,
+			scratch.clip_verts.data(),
+			scratch.outcodes.data(),
+			scratch.px.data(),
+			scratch.py.data(),
+			scratch.zw.data(),
+			scratch.iw.data(),
+			i0,
+			i1,
+			i2,
+			width,
+			height,
+			kUnusedFlat,
+			cull_backfaces,
+			t0[0],
+			t0[1],
+			t1[0],
+			t1[1],
+			t2[0],
+			t2[1],
+			atlas_rgba,
+			atlas_w,
+			atlas_h);
+	};
+
+	if (index_count > 0U && indices != nullptr) {
+		const std::size_t tri_count = index_count / 3U;
+		screen.reserve(screen.size() + tri_count);
+		for (std::size_t t = 0U; t < tri_count; ++t) {
+			const std::size_t base = t * 3U;
+			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
+		}
+	} else {
+		const std::size_t tri_count = vertex_count / 3U;
+		screen.reserve(screen.size() + tri_count);
+		for (std::size_t t = 0U; t < tri_count; ++t) {
+			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
+			emit_indexed(i0, i0 + 1U, i0 + 2U);
+		}
+	}
+}
+
+/**
+ * Triangles emitted by one mesh instance (indexed or triangle-list).
+ */
+inline std::size_t MeshInstanceTriCount(
+	const std::size_t vertex_count,
+	const std::size_t index_count) {
+	if (index_count > 0U) {
+		return index_count / 3U;
+	}
+	return vertex_count / 3U;
+}
+
+/**
+ * Raster a retained mesh: positions (xyz) + optional indices through MVP into the tiled path.
+ *
+ * mvp16 = view_proj * model (column-major). Empty indices (index_count == 0) means a triangle
+ * list over positions. Transforms each unique vertex once (AVX2 gather when available), then
+ * outcode accept/reject + project-once for fully-visible verts. Reuses RasterScreenTrisTiled.
+ */
+inline void RasterMeshWorld(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const float* mvp16,
+	const float* positions,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint32_t tri_color,
+	const bool cull_backfaces) {
+	if (positions == nullptr || mvp16 == nullptr || vertex_count < 3U) {
+		return;
+	}
+	const int width = framebuffer.Width();
+	const int height = framebuffer.Height();
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
+	AppendFlatMeshTris(
+		screen,
+		scratch,
+		mvp16,
+		positions,
+		vertex_count,
+		indices,
+		index_count,
+		tri_color,
+		cull_backfaces,
+		width,
+		height);
+	detail3d::RasterScreenTrisTiled(framebuffer, depth, screen);
+}
+
+/**
+ * Raster one mesh with many model matrices: transform/clip/emit per instance, bin/fill once.
+ *
+ * models16: instance_count × 16 float32 column-major model matrices. view_proj16 is the
+ * current world→clip matrix. N=1 uses the same emit path as RasterMeshWorld.
+ */
+inline void RasterMeshWorldMany(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const float* view_proj16,
+	const float* models16,
+	const std::size_t instance_count,
+	const float* positions,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint32_t tri_color,
+	const bool cull_backfaces) {
+	if (positions == nullptr || view_proj16 == nullptr || models16 == nullptr || vertex_count < 3U ||
+		instance_count == 0U) {
+		return;
+	}
+	const int width = framebuffer.Width();
+	const int height = framebuffer.Height();
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
+	const std::size_t tris_per_instance = MeshInstanceTriCount(vertex_count, index_count);
+	screen.reserve(tris_per_instance * instance_count);
+	float mvp[16];
+	for (std::size_t inst = 0U; inst < instance_count; ++inst) {
+		MulMat4ColumnMajor(view_proj16, models16 + inst * 16U, mvp);
+		AppendFlatMeshTris(
+			screen,
+			scratch,
+			mvp,
+			positions,
+			vertex_count,
+			indices,
+			index_count,
+			tri_color,
+			cull_backfaces,
+			width,
+			height);
 	}
 	detail3d::RasterScreenTrisTiled(framebuffer, depth, screen);
 }
@@ -1889,77 +2077,76 @@ inline void RasterMeshTexturedWorld(
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
 	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
-	scratch.clip_verts.resize(vertex_count);
-	scratch.outcodes.resize(vertex_count);
-	scratch.px.resize(vertex_count);
-	scratch.py.resize(vertex_count);
-	scratch.zw.resize(vertex_count);
-	scratch.iw.resize(vertex_count);
-	detail3d::TransformMeshPositions(
-		mvp16,
-		positions,
-		vertex_count,
-		scratch.clip_verts.data(),
-		scratch.outcodes.data(),
-		scratch.px.data(),
-		scratch.py.data(),
-		scratch.zw.data(),
-		scratch.iw.data(),
-		width,
-		height);
-
 	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
 	screen.clear();
-	// Flat color unused when atlas is set; pass opaque white as a harmless placeholder.
-	constexpr std::uint32_t kUnusedFlat = 0xFFFFFFFFU;
+	AppendTexturedMeshTris(
+		screen,
+		scratch,
+		mvp16,
+		positions,
+		uvs,
+		vertex_count,
+		indices,
+		index_count,
+		atlas_rgba,
+		atlas_w,
+		atlas_h,
+		cull_backfaces,
+		width,
+		height);
+	detail3d::RasterScreenTrisTiled(framebuffer, depth, screen);
+}
 
-	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
-		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
-			return;
-		}
-		const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
-		const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
-		const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
-		detail3d::EmitIndexedClipTri(
+/**
+ * Textured mesh with many model matrices: transform/clip/emit per instance, bin/fill once.
+ */
+inline void RasterMeshTexturedWorldMany(
+	FrameBuffer& framebuffer,
+	DepthBuffer* depth,
+	const float* view_proj16,
+	const float* models16,
+	const std::size_t instance_count,
+	const float* positions,
+	const float* uvs,
+	const std::size_t vertex_count,
+	const std::uint32_t* indices,
+	const std::size_t index_count,
+	const std::uint8_t* atlas_rgba,
+	const int atlas_w,
+	const int atlas_h,
+	const bool cull_backfaces) {
+	if (positions == nullptr || uvs == nullptr || view_proj16 == nullptr || models16 == nullptr ||
+		vertex_count < 3U || instance_count == 0U) {
+		return;
+	}
+	if (atlas_rgba == nullptr || atlas_w <= 0 || atlas_h <= 0) {
+		return;
+	}
+	const int width = framebuffer.Width();
+	const int height = framebuffer.Height();
+	detail3d::MeshDrawScratch& scratch = detail3d::GetMeshDrawScratch();
+	std::vector<detail3d::ScreenTri>& screen = scratch.screen;
+	screen.clear();
+	const std::size_t tris_per_instance = MeshInstanceTriCount(vertex_count, index_count);
+	screen.reserve(tris_per_instance * instance_count);
+	float mvp[16];
+	for (std::size_t inst = 0U; inst < instance_count; ++inst) {
+		MulMat4ColumnMajor(view_proj16, models16 + inst * 16U, mvp);
+		AppendTexturedMeshTris(
 			screen,
-			scratch.clip_verts.data(),
-			scratch.outcodes.data(),
-			scratch.px.data(),
-			scratch.py.data(),
-			scratch.zw.data(),
-			scratch.iw.data(),
-			i0,
-			i1,
-			i2,
-			width,
-			height,
-			kUnusedFlat,
-			cull_backfaces,
-			t0[0],
-			t0[1],
-			t1[0],
-			t1[1],
-			t2[0],
-			t2[1],
+			scratch,
+			mvp,
+			positions,
+			uvs,
+			vertex_count,
+			indices,
+			index_count,
 			atlas_rgba,
 			atlas_w,
-			atlas_h);
-	};
-
-	if (index_count > 0U && indices != nullptr) {
-		const std::size_t tri_count = index_count / 3U;
-		screen.reserve(tri_count);
-		for (std::size_t t = 0U; t < tri_count; ++t) {
-			const std::size_t base = t * 3U;
-			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
-		}
-	} else {
-		const std::size_t tri_count = vertex_count / 3U;
-		screen.reserve(tri_count);
-		for (std::size_t t = 0U; t < tri_count; ++t) {
-			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
-			emit_indexed(i0, i0 + 1U, i0 + 2U);
-		}
+			atlas_h,
+			cull_backfaces,
+			width,
+			height);
 	}
 	detail3d::RasterScreenTrisTiled(framebuffer, depth, screen);
 }
