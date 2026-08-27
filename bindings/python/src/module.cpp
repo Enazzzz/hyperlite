@@ -1162,6 +1162,147 @@ static PyObject* PyEngine_tris_screen(PyEngineObject* self, PyObject* args) {
 }
 
 /**
+ * Load a retained mesh: float32 verts (6/vert = x,y,z,u,v,_pad) + optional uint32 indices.
+ *
+ * indices may be None or empty → triangle list. Returns integer handle.
+ */
+static PyObject* PyEngine_load_mesh(PyEngineObject* self, PyObject* args) {
+	PyObject* verts_obj = nullptr;
+	PyObject* indices_obj = Py_None;
+	if (!PyArg_ParseTuple(args, "O|O", &verts_obj, &indices_obj)) {
+		return nullptr;
+	}
+	Py_buffer verts_view{};
+	if (PyObject_GetBuffer(verts_obj, &verts_view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "verts must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (verts_view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 6) != 0) {
+		PyBuffer_Release(&verts_view);
+		PyErr_SetString(PyExc_ValueError, "verts length must be a multiple of 6 float32 values per vertex.");
+		return nullptr;
+	}
+	const float* verts = reinterpret_cast<const float*>(verts_view.buf);
+	const std::size_t vert_floats = static_cast<std::size_t>(verts_view.len) / sizeof(float);
+
+	const std::uint32_t* indices = nullptr;
+	std::size_t index_count = 0U;
+	Py_buffer indices_view{};
+	bool have_indices = false;
+	if (indices_obj != nullptr && indices_obj != Py_None) {
+		if (PyObject_GetBuffer(indices_obj, &indices_view, PyBUF_CONTIG_RO) != 0) {
+			PyBuffer_Release(&verts_view);
+			PyErr_SetString(PyExc_TypeError, "indices must expose a contiguous readonly byte view or be None.");
+			return nullptr;
+		}
+		have_indices = true;
+		if (indices_view.len > 0) {
+			if (indices_view.len % static_cast<Py_ssize_t>(sizeof(std::uint32_t)) != 0) {
+				PyBuffer_Release(&indices_view);
+				PyBuffer_Release(&verts_view);
+				PyErr_SetString(PyExc_ValueError, "indices length must be a multiple of 4 bytes (uint32).");
+				return nullptr;
+			}
+			indices = reinterpret_cast<const std::uint32_t*>(indices_view.buf);
+			index_count = static_cast<std::size_t>(indices_view.len) / sizeof(std::uint32_t);
+		}
+	}
+
+	const int handle = self->native_engine->LoadMesh(verts, vert_floats, indices, index_count);
+	if (have_indices) {
+		PyBuffer_Release(&indices_view);
+	}
+	PyBuffer_Release(&verts_view);
+	if (handle < 0) {
+		PyErr_SetString(PyExc_ValueError, "mesh upload failed (bad verts/indices).");
+		return nullptr;
+	}
+	return PyLong_FromLong(handle);
+}
+
+/**
+ * Draw a loaded mesh with a column-major 4x4 model matrix and flat RGBA color.
+ */
+static PyObject* PyEngine_draw_mesh(PyEngineObject* self, PyObject* args) {
+	int mesh_id = 0;
+	PyObject* model_obj = nullptr;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "iOiii|i", &mesh_id, &model_obj, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer model_view{};
+	if (PyObject_GetBuffer(model_obj, &model_view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "model must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (model_view.len != static_cast<Py_ssize_t>(sizeof(float) * 16U)) {
+		PyBuffer_Release(&model_view);
+		PyErr_SetString(PyExc_ValueError, "model must be exactly 16 float32 values (column-major).");
+		return nullptr;
+	}
+	const Color tri_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	self->native_engine->DrawMesh(
+		mesh_id,
+		reinterpret_cast<const float*>(model_view.buf),
+		hyperlite::PackColor(tri_color));
+	PyBuffer_Release(&model_view);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Fused poll + clear color/depth + draw_mesh + present.
+ */
+static PyObject* PyEngine_tick_mesh(PyEngineObject* self, PyObject* args) {
+	int mesh_id = 0;
+	PyObject* model_obj = nullptr;
+	int clear_r = 0;
+	int clear_g = 0;
+	int clear_b = 0;
+	int clear_a = 255;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "iOiiiiiiii", &mesh_id, &model_obj, &clear_r, &clear_g, &clear_b, &clear_a, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer model_view{};
+	if (PyObject_GetBuffer(model_obj, &model_view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "model must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (model_view.len != static_cast<Py_ssize_t>(sizeof(float) * 16U)) {
+		PyBuffer_Release(&model_view);
+		PyErr_SetString(PyExc_ValueError, "model must be exactly 16 float32 values (column-major).");
+		return nullptr;
+	}
+	const Color clear_color{
+		static_cast<std::uint8_t>(clear_r),
+		static_cast<std::uint8_t>(clear_g),
+		static_cast<std::uint8_t>(clear_b),
+		static_cast<std::uint8_t>(clear_a)};
+	const Color tri_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	const int draw_count = self->native_engine->TickMesh(
+		hyperlite::PackColor(clear_color),
+		mesh_id,
+		reinterpret_cast<const float*>(model_view.buf),
+		hyperlite::PackColor(tri_color));
+	PyBuffer_Release(&model_view);
+	return PyLong_FromLong(draw_count);
+}
+
+/**
  * Queue many line commands from one int32 segment buffer.
  */
 static PyObject* PyEngine_lines_bulk(PyEngineObject* self, PyObject* args) {
@@ -1877,6 +2018,9 @@ static PyMethodDef PyEngine_methods[] = {
 	{"tick_tris_3d", reinterpret_cast<PyCFunction>(PyEngine_tick_tris_3d), METH_VARARGS, "Poll + clear color/depth + world-space filled triangles + present."},
 	{"tris_3d", reinterpret_cast<PyCFunction>(PyEngine_tris_3d), METH_VARARGS, "Flush pending 2D then draw world-space filled triangles (float32 x9)."},
 	{"tris_screen", reinterpret_cast<PyCFunction>(PyEngine_tris_screen), METH_VARARGS, "Pixel xy + NDC z [-1,1] filled triangles (float32 x9); skips view-proj."},
+	{"load_mesh", reinterpret_cast<PyCFunction>(PyEngine_load_mesh), METH_VARARGS, "Load retained mesh (float32 x6/vert + optional uint32 indices); returns handle."},
+	{"draw_mesh", reinterpret_cast<PyCFunction>(PyEngine_draw_mesh), METH_VARARGS, "Draw loaded mesh with column-major 4x4 model matrix and flat color."},
+	{"tick_mesh", reinterpret_cast<PyCFunction>(PyEngine_tick_mesh), METH_VARARGS, "Poll + clear color/depth + draw_mesh + present."},
 	{"lines_bulk", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk), METH_VARARGS, "Queue many lines from one int32 segment buffer."},
 	{"lines_bulk_colored", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk_colored), METH_VARARGS, "Queue many lines with per-segment packed colors."},
 	{"put_pixels_buffer", reinterpret_cast<PyCFunction>(PyEngine_put_pixels_buffer), METH_VARARGS, "Queue many pixels from interleaved int32 x,y pairs."},

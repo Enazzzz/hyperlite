@@ -58,6 +58,7 @@ endif()
 set(HYPERLITE_ENGINE_SOURCES
 	engine/src/core/frame_loop.cpp
 	engine/src/core/atlas_store.cpp
+	engine/src/core/mesh_store.cpp
 	engine/src/core/retained_layer.cpp
 	engine/src/core/command_buffer_sort.cpp
 	engine/src/platform/platform_window.cpp
@@ -181,6 +182,10 @@ if(HYPERLITE_BUILD_BENCHMARKS)
 	add_executable(cpu_tri_bench benchmarks/cpu_tri_bench.cpp)
 	target_link_libraries(cpu_tri_bench PRIVATE hyperlite_engine)
 	set_property(TARGET cpu_tri_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+	add_executable(cpu_mesh_bench benchmarks/cpu_mesh_bench.cpp)
+	target_link_libraries(cpu_mesh_bench PRIVATE hyperlite_engine)
+	set_property(TARGET cpu_mesh_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 endif()
 
 if(HYPERLITE_BUILD_TESTS)
@@ -205,4 +210,9 @@ if(HYPERLITE_BUILD_TESTS)
 	target_link_libraries(depth_tri_tests PRIVATE hyperlite_engine)
 	set_property(TARGET depth_tri_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 	add_test(NAME depth_tri_tests COMMAND depth_tri_tests)
+
+	add_executable(mesh_layer_tests tests/mesh_layer_tests.cpp)
+	target_link_libraries(mesh_layer_tests PRIVATE hyperlite_engine)
+	set_property(TARGET mesh_layer_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	add_test(NAME mesh_layer_tests COMMAND mesh_layer_tests)
 endif()
