@@ -55,6 +55,19 @@ class PresetConfig:
 	default_seconds: float | None
 	ridge_lines: bool
 	headless: bool
+	# Chunk-center distance (in chunk units) below which each LOD is used.
+	lod_near_chunks: float = 3.0
+	lod_mid_chunks: float = 7.0
+
+
+def lod_grid_verts(full_grid_verts: int, lod: int) -> int:
+	"""Verts per edge for geo-mip LOD (lod 0 = full, 1 = half quads, 2 = quarter)."""
+	if lod <= 0:
+		return full_grid_verts
+	quads = full_grid_verts - 1
+	step = 1 << lod
+	coarse_quads = max(1, quads // step)
+	return coarse_quads + 1
 
 
 PRESETS: dict[str, PresetConfig] = {
@@ -111,16 +124,21 @@ PRESETS: dict[str, PresetConfig] = {
 
 @dataclass
 class ChunkRecord:
-	"""One terrain chunk uploaded to the engine."""
+	"""One terrain chunk uploaded to the engine (one mesh per geo-mip LOD)."""
 
-	mesh_id: int
+	mesh_ids: tuple[int, ...]
+	tri_counts: tuple[int, ...]
 	cx: int
 	cz: int
 	center: np.ndarray
 	aabb_min: np.ndarray
 	aabb_max: np.ndarray
-	tri_count: int
 	model: np.ndarray
+
+	@property
+	def lod_levels(self) -> int:
+		"""Number of retained LOD meshes for this chunk."""
+		return len(self.mesh_ids)
 
 
 @dataclass
@@ -596,25 +614,37 @@ class ProcWorld:
 
 		for cz in range(self.cfg.world_chunks):
 			for cx in range(self.cfg.world_chunks):
-				verts, indices, aabb_min, aabb_max, tri_count = build_chunk_mesh(
-					self.noise,
-					cx,
-					cz,
-					self.cfg.grid_verts,
-					self.cfg.chunk_size,
-				)
-				mesh_id = engine.load_mesh(verts, indices)
+				lod_mesh_ids: list[int] = []
+				lod_tri_counts: list[int] = []
+				aabb_min: np.ndarray | None = None
+				aabb_max: np.ndarray | None = None
+				max_lod = self._max_chunk_lod()
+				for lod in range(max_lod + 1):
+					grid = lod_grid_verts(self.cfg.grid_verts, lod)
+					verts, indices, chunk_min, chunk_max, tri_count = build_chunk_mesh(
+						self.noise,
+						cx,
+						cz,
+						grid,
+						self.cfg.chunk_size,
+					)
+					lod_mesh_ids.append(engine.load_mesh(verts, indices))
+					lod_tri_counts.append(tri_count)
+					if lod == 0:
+						aabb_min = chunk_min
+						aabb_max = chunk_max
+				assert aabb_min is not None and aabb_max is not None
 				center = (aabb_min + aabb_max) * 0.5
 				model = mat4_identity()
 				self.chunks.append(
 					ChunkRecord(
-						mesh_id=mesh_id,
+						mesh_ids=tuple(lod_mesh_ids),
+						tri_counts=tuple(lod_tri_counts),
 						cx=cx,
 						cz=cz,
 						center=center,
 						aabb_min=aabb_min,
 						aabb_max=aabb_max,
-						tri_count=tri_count,
 						model=model,
 					)
 				)
@@ -634,7 +664,7 @@ class ProcWorld:
 			self._build_ridge_lines()
 
 		elapsed = time.perf_counter() - t0
-		total_tris = sum(c.tri_count for c in self.chunks) + self.water_tris
+		total_tris = sum(c.tri_counts[0] for c in self.chunks) + self.water_tris
 		print(
 			f"proc_world generated preset={self.cfg.name} seed={self.seed} "
 			f"chunks={len(self.chunks)} props={len(self.props)} "
@@ -716,6 +746,57 @@ class ProcWorld:
 				segs.extend((x, y0, z, x2, y0, z))
 		self.ridge_segments = np.asarray(segs, dtype=np.float32)
 
+	def _max_chunk_lod(self) -> int:
+		"""Highest geo-mip index for this preset."""
+		return 2 if self.cfg.grid_verts >= 21 else 1
+
+	def _chunk_lod_for_dist(self, dist: float) -> int:
+		"""Pick geo-mip LOD from horizontal distance to chunk center (chunk units)."""
+		cs = self.cfg.chunk_size
+		d_chunks = dist / cs
+		if d_chunks <= self.cfg.lod_near_chunks:
+			return 0
+		if d_chunks <= self.cfg.lod_mid_chunks:
+			return 1
+		return self._max_chunk_lod()
+
+	def _clamp_neighbor_lods(
+		self,
+		entries: list[tuple[float, ChunkRecord, int]],
+	) -> list[tuple[float, ChunkRecord, int]]:
+		"""Limit LOD delta across shared chunk edges to at most one (reduces T-junction cracks)."""
+		if len(entries) <= 1:
+			return entries
+		lod_map: dict[tuple[int, int], int] = {(c.cx, c.cz): lod for _, c, lod in entries}
+		dist_map: dict[tuple[int, int], float] = {(c.cx, c.cz): dist for dist, c, _ in entries}
+		changed = True
+		while changed:
+			changed = False
+			for (cx, cz), lod in list(lod_map.items()):
+				for dcx, dcz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+					neighbor = (cx + dcx, cz + dcz)
+					nlod = lod_map.get(neighbor)
+					if nlod is None:
+						continue
+					if lod - nlod <= 1:
+						continue
+					# Refine the farther chunk so adjacent LOD steps differ by at most one.
+					if dist_map[(cx, cz)] > dist_map[neighbor]:
+						new_lod = nlod + 1
+						if new_lod != lod:
+							lod_map[(cx, cz)] = new_lod
+							changed = True
+					else:
+						new_lod = lod + 1
+						if new_lod != nlod:
+							lod_map[neighbor] = new_lod
+							changed = True
+		out: list[tuple[float, ChunkRecord, int]] = []
+		for dist, chunk, _ in entries:
+			lod = lod_map[(chunk.cx, chunk.cz)]
+			out.append((dist, chunk, lod))
+		return out
+
 	def draw(
 		self,
 		engine: hyperlite.Engine,
@@ -728,16 +809,27 @@ class ProcWorld:
 		draw_dist = self.cfg.draw_radius * self.cfg.chunk_size
 		draw_dist_sq = draw_dist * draw_dist
 
+		visible_terrain: list[tuple[float, ChunkRecord, int]] = []
 		for chunk in self.chunks:
 			dx = float(chunk.center[0] - camera_pos[0])
 			dz = float(chunk.center[2] - camera_pos[2])
-			if dx * dx + dz * dz > draw_dist_sq:
+			dist_sq = dx * dx + dz * dz
+			if dist_sq > draw_dist_sq:
 				continue
 			if not aabb_visible(chunk.aabb_min, chunk.aabb_max, planes):
 				continue
-			engine.draw_mesh_textured(chunk.mesh_id, chunk.model, self.atlas_id)
+			dist = math.sqrt(dist_sq)
+			lod = min(self._chunk_lod_for_dist(dist), chunk.lod_levels - 1)
+			visible_terrain.append((dist, chunk, lod))
+
+		visible_terrain = self._clamp_neighbor_lods(visible_terrain)
+		# Near-to-far so per-tile Hi-Z can reject later chunks.
+		visible_terrain.sort(key=lambda item: item[0])
+
+		for _dist, chunk, lod in visible_terrain:
+			engine.draw_mesh_textured(chunk.mesh_ids[lod], chunk.model, self.atlas_id)
 			stats.chunks_drawn += 1
-			stats.tris_submitted += chunk.tri_count
+			stats.tris_submitted += chunk.tri_counts[lod]
 
 		# Water (translucent — no depth write path).
 		water_min = np.array([0.0, WATER_LEVEL - 0.5, 0.0], dtype=np.float32)
