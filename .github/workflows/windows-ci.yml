@@ -21,10 +21,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # windows-latest ships VS 2026 (generator "Visual Studio 18 2026"); do not
+      # hardcode VS 2022 — let CMake select the newest installed VS instance.
       - name: Configure
         run: |
           cmake -S . -B build `
-            -G "Visual Studio 17 2022" -A x64 `
+            -A x64 `
             -DHYPERLITE_ENABLE_CUDA=OFF `
             -DHYPERLITE_BUILD_TESTS=ON `
             -DHYPERLITE_BUILD_BENCHMARKS=ON `
