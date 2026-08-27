@@ -26,7 +26,7 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 - World path: Sutherland–Hodgman clip in homogeneous clip space (±w, near mandatory); clipped ngon fans back to tris
 - `set_cull_backfaces(True)` default on for world path (keeps OpenGL-front after viewport Y flip); screen path culls off
 - Perspective-correct depth: interpolate `z/w` (and `1/w`) in screen space
-- Portable CPU (scalar; optional AVX2 only via existing blend helpers when the arch enables it)
+- Portable CPU (scalar fallback; AVX2/SSE4.2 pixel blocks when the arch enables them — see [simd-tri-fill.md](simd-tri-fill.md))
 
 ## Layer 2 — Retained meshes (shipped)
 
