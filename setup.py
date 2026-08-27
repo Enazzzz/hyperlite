@@ -1,7 +1,7 @@
 """Local install helper for the Hyperlite native Python extension.
 
-Builds the C++/CUDA engine with CMake, then packages ``hyperlite.pyd`` for
-``pip install .`` (local only — not published to PyPI).
+Builds the C++/CUDA engine with CMake, then packages ``hyperlite.pyd`` (Windows)
+or ``hyperlite*.so`` (Linux) for ``pip install .`` (local only — not published to PyPI).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from setuptools import Extension, setup
@@ -21,78 +22,90 @@ from setuptools.dist import Distribution
 ROOT = Path(__file__).resolve().parent
 BUILD_DIR = ROOT / "build"
 RELEASE_DIR = BUILD_DIR / "Release"
-PYD_NAME = "hyperlite.pyd"
 
 
-def _find_pyd() -> Path | None:
+def _extension_names() -> list[str]:
+	"""Candidate filenames for the built native module on this platform."""
+	if platform.system() == "Windows":
+		return ["hyperlite.pyd"]
+	suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+	return [f"hyperlite{suffix}", "hyperlite.so"]
+
+
+def _find_extension() -> Path | None:
 	"""Return the built extension path if it exists."""
-	for path in (RELEASE_DIR / PYD_NAME, BUILD_DIR / PYD_NAME):
-		if path.is_file():
-			return path
-	for path in BUILD_DIR.rglob(PYD_NAME):
-		if path.is_file():
-			return path
+	names = _extension_names()
+	for name in names:
+		for path in (RELEASE_DIR / name, BUILD_DIR / name):
+			if path.is_file():
+				return path
+	for name in names:
+		for path in BUILD_DIR.rglob(name):
+			if path.is_file():
+				return path
+	# Fallback: any hyperlite shared object produced by CMake.
+	for pattern in ("hyperlite*.so", "hyperlite*.pyd", "hyperlite*.dylib"):
+		matches = sorted(BUILD_DIR.rglob(pattern))
+		if matches:
+			return matches[0]
 	return None
 
 
 def _run_cmake_build() -> None:
 	"""Configure and compile the native engine via CMake."""
-	if platform.system() != "Windows":
-		raise RuntimeError("Hyperlite currently supports Windows only.")
-
 	build_type = os.environ.get("HYPERLITE_BUILD_TYPE", "Release")
 	BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
 	# Always bind the extension to the Python running pip — reusing a CMake cache
-	# built for a different interpreter produces a .pyd linked to the wrong
-	# python3xx.dll (e.g. cp310 tag with python311.dll inside).
+	# built for a different interpreter produces a module linked to the wrong runtime.
 	python_exe = Path(sys.executable).resolve()
-	subprocess.run(
-		[
-			"cmake",
-			"-S",
-			str(ROOT),
-			"-B",
-			str(BUILD_DIR),
-			f"-DCMAKE_BUILD_TYPE={build_type}",
-			"-DHYPERLITE_BUILD_PYTHON_BINDINGS=ON",
-			"-DHYPERLITE_ENABLE_CUDA=ON",
-			f"-DPython3_EXECUTABLE={python_exe}",
-		],
-		check=True,
-	)
+	cmake_cmd = [
+		"cmake",
+		"-S",
+		str(ROOT),
+		"-B",
+		str(BUILD_DIR),
+		f"-DCMAKE_BUILD_TYPE={build_type}",
+		"-DHYPERLITE_BUILD_PYTHON_BINDINGS=ON",
+		"-DHYPERLITE_ENABLE_CUDA=ON",
+		f"-DPython3_EXECUTABLE={python_exe}",
+	]
+	# Prefer g++ on Linux so OpenMP (-fopenmp) links cleanly.
+	if platform.system() == "Linux" and shutil.which("g++"):
+		cmake_cmd.append("-DCMAKE_CXX_COMPILER=g++")
 
-	build_cmd = ["cmake", "--build", str(BUILD_DIR), "--config", build_type]
-	if os.cpu_count():
-		build_cmd.extend(["--", "/m"])
+	subprocess.run(cmake_cmd, check=True)
+
+	build_cmd = ["cmake", "--build", str(BUILD_DIR), "--config", build_type, "-j", str(os.cpu_count() or 2)]
 	subprocess.run(build_cmd, check=True)
 
 
 class CMakeBuildExt(build_ext):
-	"""Run CMake when needed and stage hyperlite.pyd for wheel/install."""
+	"""Run CMake when needed and stage the native module for wheel/install."""
 
 	def run(self) -> None:
-		# Rebuild when the invoking interpreter changes (CMake cache is per-tree).
 		print(f"[hyperlite] Building for Python {sys.executable}")
-		if _find_pyd() is not None:
-			# Force relink against the current Python — stale .pyd may be cached.
-			for path in BUILD_DIR.rglob(PYD_NAME):
-				path.unlink(missing_ok=True)
+		found = _find_extension()
+		if found is not None:
+			# Force relink against the current Python — stale modules may be cached.
+			for pattern in ("hyperlite*.so", "hyperlite*.pyd", "hyperlite*.dylib"):
+				for path in BUILD_DIR.rglob(pattern):
+					path.unlink(missing_ok=True)
 		print("[hyperlite] Building native extension with CMake...")
 		_run_cmake_build()
 
-		pyd = _find_pyd()
-		if pyd is None:
-			raise RuntimeError(f"Could not find {PYD_NAME} after CMake build under {BUILD_DIR}.")
+		ext_path = _find_extension()
+		if ext_path is None:
+			raise RuntimeError(f"Could not find hyperlite native module after CMake build under {BUILD_DIR}.")
 
 		dest = Path(self.get_ext_fullpath("hyperlite"))
 		dest.parent.mkdir(parents=True, exist_ok=True)
-		shutil.copy2(pyd, dest)
-		print(f"[hyperlite] Staged {pyd} -> {dest}")
+		shutil.copy2(ext_path, dest)
+		print(f"[hyperlite] Staged {ext_path} -> {dest}")
 
 
 class BinaryDistribution(Distribution):
-	"""Mark wheel as platform-specific (contains a .pyd)."""
+	"""Mark wheel as platform-specific (contains a native extension)."""
 
 	def has_ext_modules(self) -> bool:
 		return True

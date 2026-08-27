@@ -2,37 +2,46 @@
 
 Super lightweight immediate-mode renderer for Python — like pygame, but you draw every pixel (or line, or rect) yourself, and the engine stays out of your way.
 
-**Windows only** · **CPU or CUDA GPU backend** · **Not on PyPI** (local install only)
+**Windows & Linux** · **CPU or CUDA GPU backend** · **Not on PyPI** (local install only)
 
 ## Quick start
+
+### Windows
 
 **Requirements:** Windows 10/11, Python 3.10+, [Visual Studio 2022](https://visualstudio.microsoft.com/) (C++ workload), [CMake](https://cmake.org/) 3.24+. Optional: [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) for GPU rendering.
 
 ```powershell
-# From the repo root — builds native code + installs into your active Python
 .\scripts\install.ps1
-
-# Run a demo
 python python\examples\minimal_game.py
-python python\examples\pixel_stress.py
 ```
 
-Manual install:
+### Linux
 
-```powershell
-pip install .
-# or editable while developing:
-pip install -e .
+**Requirements:** g++ (C++20), CMake 3.24+, Python 3.10+ with headers (`python3-dev`). Optional: `libx11-dev` + `libxext-dev` for a real window; CUDA toolkit for `"gpu"`.
+
+```bash
+sudo apt-get install -y build-essential g++ cmake python3-dev python3-venv \
+  libx11-dev libxext-dev libomp-dev
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+python3 -m venv .venv && .venv/bin/pip install .
+# Headless (CI / no DISPLAY):
+HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print(e.backend_name())"
+# Windowed (needs DISPLAY + X11 libs):
+.venv/bin/python python/examples/minimal_game.py
 ```
 
-**Full documentation:** [docs/guide.md](docs/guide.md) — installation, API reference, game loop patterns, GPU path, examples, troubleshooting.
+Or: `bash scripts/install.sh`
+
+**Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
+**Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)
 
 ## What you get
 
 ```python
 import hyperlite
 
-engine = hyperlite.Engine(1280, 720, "gpu", "My Game")
+engine = hyperlite.Engine(1280, 720, "cpu", "My Game")  # or backend="gpu"
 
 while engine.is_running():
     engine.poll_events()
@@ -43,17 +52,28 @@ while engine.is_running():
     engine.present()
 ```
 
-No scene graph, no sprites, no UI toolkit — just a fast framebuffer, draw commands, input, and a window.
+No scene graph, no sprites, no UI toolkit — just a fast framebuffer, draw commands, input, and a window (or headless present for tests/CI).
+
+### Present modes
+
+| Mode | How | When |
+|------|-----|------|
+| `auto` (default) | Window if a display exists, else headless | Interactive apps |
+| `headless` | No window; `present()` is a no-op | CI, benches, servers |
+| `window` | Win32 (Windows) or X11 (Linux) | Force a window |
+
+Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRESENT=headless|window`.
 
 ## Project layout
 
 | Path | Purpose |
 |------|---------|
-| `engine/` | C++ core (Win32 window, CPU/GPU rasterizers) |
+| `engine/` | C++ core (Win32/X11/headless, CPU/GPU rasterizers) |
 | `bindings/python/` | Python C extension |
 | `python/examples/` | Demos and benchmarks |
-| `docs/guide.md` | **How-to guide (start here for games)** |
-| `scripts/install.ps1` | One-command local install |
+| `docs/guide.md` | **How-to guide** |
+| `docs/linux-bench.md` | Linux baseline numbers |
+| `scripts/install.ps1` / `install.sh` | One-command local install |
 
 ## License
 

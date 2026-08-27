@@ -42,7 +42,7 @@ void FillWireframeSegments(std::vector<std::int32_t>& segments, const int width,
  * Benchmark TickLines fused wireframe path via Engine.
  */
 int main() {
-	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite Line Bench");
+	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite Line Bench", hyperlite::PresentMode::kHeadless);
 	engine.SetVsync(false);
 
 	constexpr int frame_iterations = 120;

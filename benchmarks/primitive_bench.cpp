@@ -21,7 +21,7 @@ double ElapsedMs(
  * Benchmark command submission and CPU raster execution throughput.
  */
 int main() {
-	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite Bench");
+	hyperlite::Engine engine(1280, 720, hyperlite::BackendKind::kCpu, "Hyperlite Bench", hyperlite::PresentMode::kHeadless);
 	constexpr int frame_iterations = 120;
 	constexpr int draw_calls_per_frame = 50'000;
 

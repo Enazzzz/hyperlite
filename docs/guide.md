@@ -35,13 +35,13 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 
 ## 1. What Hyperlite is (and is not)
 
-Hyperlite is an **immediate-mode 2D renderer** for Python on Windows:
+Hyperlite is an **immediate-mode 2D renderer** for Python on **Windows and Linux**:
 
 - You own the game logic in plain Python.
 - Every frame, **you** queue draw operations (`clear`, `line`, `rect_fill`, `draw_sprite`, …).
-- The engine rasterizes in **painter’s order** and presents to a Win32 window.
+- The engine rasterizes in **painter’s order** and presents to a Win32 or X11 window (or headless for CI).
 
-Think **pygame’s surface + blit model**, stripped to the metal: no scene graph, no font renderer, no audio mixer, no cross-platform abstraction layer.
+Think **pygame’s surface + blit model**, stripped to the metal: no scene graph, no font renderer, no audio mixer.
 
 ### Good for
 
@@ -55,7 +55,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 ### Not good for (today)
 
 - 3D, shaders, or a full UI toolkit
-- Cross-platform macOS/Linux (Windows only)
+- macOS (Windows + Linux only for now)
 - “Drop in PNG and forget” without using `load_atlas` / `blit_rgba`
 - Built-in text rendering, physics, or networking
 
@@ -66,20 +66,38 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 | Game logic | Python | — |
 | Draw list | `line`, `draw_sprite`, `upload_frame_rgba`, … | Queues commands |
 | Raster | — | CPU SIMD / CUDA |
-| Present | — | GDI or DXGI → window |
+| Present | — | Win32 GDI/DXGI, X11 (XShm), or headless |
 
 ---
 
 ## 2. Requirements
 
+### Windows
+
 | Component | Required | Notes |
 |-----------|----------|-------|
-| Windows 10/11 | Yes | Win32 window + input |
-| Python 3.10+ | Yes | 3.11 tested; install **per interpreter** |
+| Windows 10/11 | Yes | Win32 window + DXGI/GDI present |
+| Python 3.10+ | Yes | 3.11/3.12 tested; install **per interpreter** |
 | Visual Studio 2022 | Yes | “Desktop development with C++” |
 | CMake 3.24+ | Yes | On `PATH` |
 | CUDA Toolkit | Optional | Required for `"gpu"` backend |
-| NumPy | Optional | **Strongly recommended** for wireframe buffers and software raster |
+| NumPy | Optional | **Strongly recommended** for wireframe buffers |
+
+### Linux
+
+| Component | Required | Notes |
+|-----------|----------|-------|
+| g++ (C++20) / CMake 3.24+ | Yes | `build-essential` + `cmake` |
+| Python 3.10+ + `python3-dev` | Yes | Needed to build the `.so` extension |
+| `libomp-dev` | Recommended | OpenMP for CPU line batches |
+| `libx11-dev` `libxext-dev` | Optional | Real window + MIT-SHM blit; without them → headless-only |
+| CUDA Toolkit | Optional | `"gpu"` backend |
+| Display (`DISPLAY`) | Optional | Unset → auto headless (CI-friendly) |
+
+```bash
+sudo apt-get install -y build-essential g++ cmake python3-dev python3-venv \
+  libx11-dev libxext-dev libomp-dev
+```
 
 ---
 
@@ -87,10 +105,10 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 
 Hyperlite is **not on PyPI**. Install from a local clone.
 
-### Option A — install script (recommended)
+### Windows — Option A (install script)
 
 ```powershell
-cd C:\path\to\new-performance-sims
+cd C:\path\to\hyperlite
 .\scripts\install.ps1
 ```
 
@@ -102,12 +120,38 @@ Builds Release, runs `pip install`, prepends CUDA to PATH when found.
 .\scripts\install.ps1 -SkipCudaPath
 ```
 
-### Option B — pip directly
+### Windows — Option B (pip)
 
 ```powershell
 python -m pip install . --force-reinstall --user   # Store Python
 py -3.11 -m pip install . --force-reinstall      # Programs Python 3.11
 ```
+
+### Linux
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+python3 -m venv .venv
+.venv/bin/pip install .
+# or: bash scripts/install.sh
+```
+
+Headless CI / no display:
+
+```bash
+HYPERLITE_HEADLESS=1 .venv/bin/python -c \
+  "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print('OK', e.backend_name())"
+```
+
+Native tests without Python:
+
+```bash
+ctest --test-dir build --output-on-failure
+./build/cpu_line_bench
+./build/primitive_bench
+```
+
+See [linux-bench.md](linux-bench.md) for measured baseline numbers.
 
 ### Verify
 
@@ -115,14 +159,19 @@ py -3.11 -m pip install . --force-reinstall      # Programs Python 3.11
 python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu'); print('OK', hyperlite.__file__, e.backend_name())"
 ```
 
+```bash
+.venv/bin/python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print('OK', hyperlite.__file__, e.backend_name())"
+```
+
 ### Critical install rules
 
-1. **Same Python for pip and run** — Store `python`, `py -3.10`, and `py -3.11` are separate; install into each you use.
-2. **Unset `PYTHONPATH`** when testing the installed package — otherwise you may load stale `build/Release/hyperlite.pyd`.
-3. **GPU + DLL errors** — add CUDA `bin` to PATH or use `backend="cpu"`.
-4. **Reinstall after every engine rebuild** — `python -m pip install . --force-reinstall --user`.
+1. **Same Python for pip and run** — Store `python`, `py -3.10`, and `py -3.11` are separate; install into each you use. On Linux prefer a venv (PEP 668).
+2. **Unset `PYTHONPATH`** when testing the installed package — otherwise you may load a stale build artifact.
+3. **GPU + DLL/so errors** — add CUDA to `PATH`/`LD_LIBRARY_PATH` or use `backend="cpu"`.
+4. **Reinstall after every engine rebuild** — `pip install . --force-reinstall`.
+5. **Headless default** — when `DISPLAY` is unset on Linux, present mode is headless automatically.
 
-Do **not** rely on `PYTHONPATH=build/Release` for daily use; that bypasses site-packages and causes version skew.
+Do **not** rely on `PYTHONPATH=build/` for daily use; that bypasses site-packages and causes version skew.
 
 ---
 
@@ -709,18 +758,21 @@ Start
 
 | Mode | When | API | Latency |
 |------|------|-----|---------|
+| Headless | CI / no display / benches | `present="headless"` or `HYPERLITE_HEADLESS=1` | n/a |
+| Windowed (auto) | Interactive apps | default `present="auto"` | 0 frames |
 | Default CPU present | General CPU games | automatic | 0 frames |
 | CPU double-buffer | Wireframe at high line counts | `set_double_buffered_present(True)` | +1 frame |
-| GPU readback + GDI | `"gpu"`, general | default `present()` | 0 frames |
-| GPU direct (no CPU readback) | GPU upload/sprite heavy | `set_direct_present(True)` | 0 frames |
+| GPU readback + present | `"gpu"`, general | default `present()` | 0 frames |
+| GPU direct (no CPU readback) | Windows + CUDA→DXGI | `set_direct_present(True)` | 0 frames |
 | GPU pipelined readback | GPU throughput > latency | `set_pipelined(True)` | +1 frame |
-| Partial CPU present | Small dirty regions, low line count | `set_dirty_present(True)` | 0 frames |
+| Partial CPU present | Windows GDI dirty regions | `set_dirty_present(True)` | 0 frames |
 
 **Rules:**
 
 - Double-buffer and dirty partial **cannot** combine.
 - Double-buffer and GPU direct **cannot** combine.
-- For wireframe FPS: double-buffer on CPU. For GPU sprite games: direct present.
+- For wireframe FPS: double-buffer on CPU. For GPU sprite games on Windows: direct present.
+- On Linux, windowed present uses X11 + MIT-SHM when available; otherwise headless. DXGI/GDI APIs remain Windows-only no-ops/stubs on Linux.
 
 ### Python performance patterns
 
@@ -982,7 +1034,7 @@ See `python/examples/minimal_game.py` — uses **`backend="cpu"`** (correct for 
 ### Constructor
 
 ```python
-hyperlite.Engine(width, height, backend="cpu", title="Hyperlite")
+hyperlite.Engine(width, height, backend="cpu", title="Hyperlite", present="auto")
 ```
 
 | Arg | Type | Description |
@@ -990,17 +1042,20 @@ hyperlite.Engine(width, height, backend="cpu", title="Hyperlite")
 | `width`, `height` | int | Framebuffer size in pixels |
 | `backend` | `"cpu"` \| `"gpu"` | Rendering backend |
 | `title` | str | Window title |
+| `present` | `"auto"` \| `"headless"` \| `"window"` | Present surface (auto → headless when no display) |
+
+Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 
 ### Frame lifecycle
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `poll_events()` | None | Pump Win32 messages; updates input; handles resize |
+| `poll_events()` | None | Pump OS events (Win32/X11); updates input; handles resize |
 | `begin_frame()` | None | Start command recording; reset `delta_time` anchor |
 | `end_frame()` | None | Execute command buffer |
-| `present()` | None | Show framebuffer |
+| `present()` | None | Show framebuffer (no-op when headless) |
 | `tick()` | None | `poll_events` + `end_frame` + `present` |
-| `is_running()` | bool | Window open and not quit |
+| `is_running()` | bool | Window/session alive and not quit |
 | `delta_time()` | float | Seconds since last `begin_frame` |
 
 ### Drawing (queued — require `begin_frame` … `end_frame`)

@@ -14,13 +14,14 @@
 
 #include "engine/framebuffer.hpp"
 #include "engine/input_state.hpp"
+#include "engine/iwindow.hpp"
 
 namespace hyperlite {
 
 /**
  * Minimal Win32 presenter and input collector.
  */
-class Win32Window {
+class Win32Window final : public IWindow {
 public:
 	/**
 	 * Create a visible top-level window.
@@ -30,115 +31,36 @@ public:
 	/**
 	 * Destroy window resources.
 	 */
-	~Win32Window();
+	~Win32Window() override;
 
 	Win32Window(const Win32Window&) = delete;
 	Win32Window& operator=(const Win32Window&) = delete;
 
-	/**
-	 * Pump pending messages and update input snapshot.
-	 */
-	void PollEvents(InputState& input_state);
-
-	/**
-	 * Copy framebuffer to window client area.
-	 */
-	void Present(const FrameBuffer& framebuffer);
-
-	/**
-	 * Copy raw RGBA8 pixels to the window client area (used by pipelined present).
-	 */
-	void PresentRaw(const std::uint8_t* pixels, int frame_width, int frame_height);
-
-	/**
-	 * Queue a full-frame present on a worker thread (returns after copy to staging).
-	 */
-	void PresentRawAsync(const std::uint8_t* pixels, int frame_width, int frame_height);
-
-	/**
-	 * Block until any queued async present finishes.
-	 */
-	void FlushAsyncPresent();
-
-	/**
-	 * Enable a background thread for GDI presents (overlaps with next frame raster).
-	 */
-	void SetAsyncPresent(bool enabled);
-
-	/**
-	 * Whether async GDI present is active.
-	 */
-	bool AsyncPresentEnabled() const { return async_present_; }
-
-	/**
-	 * Copy one dirty sub-rectangle from a framebuffer to the window.
-	 */
-	void PresentRect(const FrameBuffer& framebuffer, int x, int y, int width, int height);
-
-	/**
-	 * True when window is still valid.
-	 */
-	bool IsAlive() const;
+	void PollEvents(InputState& input_state) override;
+	void Present(const FrameBuffer& framebuffer) override;
+	void PresentRaw(const std::uint8_t* pixels, int frame_width, int frame_height) override;
+	void PresentRawAsync(const std::uint8_t* pixels, int frame_width, int frame_height) override;
+	void FlushAsyncPresent() override;
+	void SetAsyncPresent(bool enabled) override;
+	bool AsyncPresentEnabled() const override { return async_present_; }
+	void PresentRect(const FrameBuffer& framebuffer, int x, int y, int width, int height) override;
+	bool IsAlive() const override;
+	void* NativeHandle() const override { return hwnd_; }
+	int Width() const override { return width_; }
+	int Height() const override { return height_; }
+	void SetMouseCaptured(bool captured) override;
+	bool MouseCaptured() const override { return mouse_captured_; }
+	void SetFullscreen(bool fullscreen) override;
+	bool IsFullscreen() const override { return fullscreen_; }
+	void SetClientSize(int width, int height) override;
+	bool ConsumeResize(int& width, int& height) override;
+	void SetVsync(bool enabled) override;
+	bool VsyncEnabled() const override { return vsync_; }
 
 	/**
 	 * Static window proc bridge.
 	 */
 	static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
-
-	/**
-	 * Return native window handle when available.
-	 */
-	void* NativeHandle() const { return hwnd_; }
-
-	/**
-	 * Client width in pixels.
-	 */
-	int Width() const { return width_; }
-
-	/**
-	 * Client height in pixels.
-	 */
-	int Height() const { return height_; }
-
-	/**
-	 * Capture mouse for FPS-style relative movement (hides cursor, warps to center).
-	 */
-	void SetMouseCaptured(bool captured);
-
-	/**
-	 * Whether the cursor is currently captured.
-	 */
-	bool MouseCaptured() const { return mouse_captured_; }
-
-	/**
-	 * Toggle borderless fullscreen on the active monitor.
-	 */
-	void SetFullscreen(bool fullscreen);
-
-	/**
-	 * Whether borderless fullscreen is active.
-	 */
-	bool IsFullscreen() const { return fullscreen_; }
-
-	/**
-	 * Resize the window so its client area matches the requested pixel size.
-	 */
-	void SetClientSize(int width, int height);
-
-	/**
-	 * Consume a pending client-area resize (returns false when unchanged).
-	 */
-	bool ConsumeResize(int& width, int& height);
-
-	/**
-	 * Enable DwmFlush after GDI present (vertical sync on desktop compositor).
-	 */
-	void SetVsync(bool enabled);
-
-	/**
-	 * Whether vsync is enabled for GDI presents.
-	 */
-	bool VsyncEnabled() const { return vsync_; }
 
 private:
 	/**
