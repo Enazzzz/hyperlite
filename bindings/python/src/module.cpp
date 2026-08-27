@@ -1019,6 +1019,149 @@ static PyObject* PyEngine_lines_3d_screen(PyEngineObject* self, PyObject* args) 
 }
 
 /**
+ * Enable/disable backface cull for world-space triangles (default on).
+ */
+static PyObject* PyEngine_set_cull_backfaces(PyEngineObject* self, PyObject* args) {
+	int enabled = 1;
+	if (!PyArg_ParseTuple(args, "p", &enabled)) {
+		return nullptr;
+	}
+	self->native_engine->SetCullBackfaces(enabled != 0);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Return whether world-space triangle backface cull is enabled.
+ */
+static PyObject* PyEngine_cull_backfaces(PyEngineObject* self, PyObject* args) {
+	(void)args;
+	if (self->native_engine->CullBackfaces()) {
+		Py_RETURN_TRUE;
+	}
+	Py_RETURN_FALSE;
+}
+
+/**
+ * Fused poll + clear color/depth + world-space filled triangles + present.
+ *
+ * verts: contiguous float32 with tri_count * 9 values (x0,y0,z0,x1,y1,z1,x2,y2,z2,...).
+ */
+static PyObject* PyEngine_tick_tris_3d(PyEngineObject* self, PyObject* args) {
+	PyObject* verts_obj = nullptr;
+	int clear_r = 0;
+	int clear_g = 0;
+	int clear_b = 0;
+	int clear_a = 255;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "Oiiiiiiii", &verts_obj, &clear_r, &clear_g, &clear_b, &clear_a, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(verts_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "world verts must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 9) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "world verts length must be a multiple of 9 float32 values per triangle.");
+		return nullptr;
+	}
+	const std::size_t tri_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 9U);
+	const Color clear_color{
+		static_cast<std::uint8_t>(clear_r),
+		static_cast<std::uint8_t>(clear_g),
+		static_cast<std::uint8_t>(clear_b),
+		static_cast<std::uint8_t>(clear_a)};
+	const Color tri_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	const int draw_count = self->native_engine->TickTris3d(
+		hyperlite::PackColor(clear_color),
+		reinterpret_cast<const float*>(view.buf),
+		tri_count,
+		hyperlite::PackColor(tri_color));
+	PyBuffer_Release(&view);
+	return PyLong_FromLong(draw_count);
+}
+
+/**
+ * Flush pending 2D, then draw world-space filled triangles (float32 x9 per tri).
+ */
+static PyObject* PyEngine_tris_3d(PyEngineObject* self, PyObject* args) {
+	PyObject* verts_obj = nullptr;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "Oiii|i", &verts_obj, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(verts_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "world verts must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 9) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "world verts length must be a multiple of 9 float32 values per triangle.");
+		return nullptr;
+	}
+	const std::size_t tri_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 9U);
+	const Color tri_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	self->native_engine->Tris3d(
+		reinterpret_cast<const float*>(view.buf),
+		tri_count,
+		hyperlite::PackColor(tri_color));
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+/**
+ * Screen-space filled triangles: pixel xy + NDC z [-1,1] per vertex (float32 x9).
+ */
+static PyObject* PyEngine_tris_screen(PyEngineObject* self, PyObject* args) {
+	PyObject* verts_obj = nullptr;
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "Oiii|i", &verts_obj, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(verts_obj, &view, PyBUF_CONTIG_RO) != 0) {
+		PyErr_SetString(PyExc_TypeError, "screen verts must expose a contiguous readonly byte view.");
+		return nullptr;
+	}
+	if (view.len % (static_cast<Py_ssize_t>(sizeof(float)) * 9) != 0) {
+		PyBuffer_Release(&view);
+		PyErr_SetString(PyExc_ValueError, "screen verts length must be a multiple of 9 float32 values per triangle.");
+		return nullptr;
+	}
+	const std::size_t tri_count = static_cast<std::size_t>(view.len) / (sizeof(float) * 9U);
+	const Color tri_color{
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)};
+	self->native_engine->TrisScreen(
+		reinterpret_cast<const float*>(view.buf),
+		tri_count,
+		hyperlite::PackColor(tri_color));
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+/**
  * Queue many line commands from one int32 segment buffer.
  */
 static PyObject* PyEngine_lines_bulk(PyEngineObject* self, PyObject* args) {
@@ -1729,6 +1872,11 @@ static PyMethodDef PyEngine_methods[] = {
 	{"tick_lines_3d", reinterpret_cast<PyCFunction>(PyEngine_tick_lines_3d), METH_VARARGS, "Poll + clear color/depth + world-space 3D lines + present."},
 	{"lines_3d", reinterpret_cast<PyCFunction>(PyEngine_lines_3d), METH_VARARGS, "Flush pending 2D then draw world-space 3D lines (float32 x6)."},
 	{"lines_3d_screen", reinterpret_cast<PyCFunction>(PyEngine_lines_3d_screen), METH_VARARGS, "Pixel xy + NDC z [-1,1] lines (float32 x6); skips view-proj."},
+	{"set_cull_backfaces", reinterpret_cast<PyCFunction>(PyEngine_set_cull_backfaces), METH_VARARGS, "Enable/disable backface cull for world-space triangles (default on)."},
+	{"cull_backfaces", reinterpret_cast<PyCFunction>(PyEngine_cull_backfaces), METH_NOARGS, "Return whether world-space triangle backface cull is enabled."},
+	{"tick_tris_3d", reinterpret_cast<PyCFunction>(PyEngine_tick_tris_3d), METH_VARARGS, "Poll + clear color/depth + world-space filled triangles + present."},
+	{"tris_3d", reinterpret_cast<PyCFunction>(PyEngine_tris_3d), METH_VARARGS, "Flush pending 2D then draw world-space filled triangles (float32 x9)."},
+	{"tris_screen", reinterpret_cast<PyCFunction>(PyEngine_tris_screen), METH_VARARGS, "Pixel xy + NDC z [-1,1] filled triangles (float32 x9); skips view-proj."},
 	{"lines_bulk", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk), METH_VARARGS, "Queue many lines from one int32 segment buffer."},
 	{"lines_bulk_colored", reinterpret_cast<PyCFunction>(PyEngine_lines_bulk_colored), METH_VARARGS, "Queue many lines with per-segment packed colors."},
 	{"put_pixels_buffer", reinterpret_cast<PyCFunction>(PyEngine_put_pixels_buffer), METH_VARARGS, "Queue many pixels from interleaved int32 x,y pairs."},

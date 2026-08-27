@@ -35,7 +35,7 @@ Or: `bash scripts/install.sh`
 
 **Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
 **Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)  
-**3D wireframe (Layer 0):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md)
+**3D wireframe (Layer 0) + filled tris (Layer 1):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md) · [docs/3d-tri-bench.md](docs/3d-tri-bench.md)
 
 ## What you get
 

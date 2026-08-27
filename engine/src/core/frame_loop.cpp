@@ -1,6 +1,7 @@
 #include "engine/engine.hpp"
 
 #include "engine/cpu_line_raster_3d.hpp"
+#include "engine/cpu_tri_raster_3d.hpp"
 #include "engine/rasterizer.hpp"
 
 #include <algorithm>
@@ -543,6 +544,65 @@ void Engine::Lines3dScreen(
 		line_count,
 		line_packed,
 		line_width);
+}
+
+void Engine::SetCullBackfaces(const bool enabled) {
+	cull_backfaces_ = enabled;
+}
+
+bool Engine::CullBackfaces() const {
+	return cull_backfaces_;
+}
+
+int Engine::TickTris3d(
+	const std::uint32_t clear_packed,
+	const float* world_verts,
+	const std::size_t tri_count,
+	const std::uint32_t tri_packed) {
+	PollEvents();
+	const auto raster_start = std::chrono::steady_clock::now();
+	raster::ClearAndRasterTris3dWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		clear_packed,
+		world_verts,
+		tri_count,
+		tri_packed,
+		cull_backfaces_);
+	wireframe_raster_ms_ = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - raster_start).count());
+	Present();
+	return static_cast<int>(tri_count);
+}
+
+void Engine::Tris3d(
+	const float* world_verts,
+	const std::size_t tri_count,
+	const std::uint32_t tri_packed) {
+	FlushPending2d();
+	raster::RasterTris3dWorld(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		view_proj_.data(),
+		world_verts,
+		tri_count,
+		tri_packed,
+		cull_backfaces_);
+}
+
+void Engine::TrisScreen(
+	const float* screen_verts,
+	const std::size_t tri_count,
+	const std::uint32_t tri_packed) {
+	FlushPending2d();
+	// Screen path: backface cull off (caller may wind either way in pixel space).
+	raster::RasterTris3dScreen(
+		ActiveFramebuffer(),
+		ActiveDepth(),
+		screen_verts,
+		tri_count,
+		tri_packed,
+		false);
 }
 
 float Engine::DepthAt(const int x, const int y) const {

@@ -248,6 +248,49 @@ public:
 		int line_width = 1);
 
 	/**
+	 * Enable/disable backface cull for world-space triangles (default on).
+	 *
+	 * Cull keeps OpenGL-front faces (CCW in NDC → CW / negative area after viewport Y flip).
+	 * Screen-space tris ignore this unless you pass cull through TrisScreen's engine default
+	 * (TrisScreen uses cull off; world paths use this flag).
+	 */
+	void SetCullBackfaces(bool enabled);
+
+	/**
+	 * Whether world-space triangle backface cull is enabled.
+	 */
+	bool CullBackfaces() const;
+
+	/**
+	 * Fused poll + clear color/depth + world-space filled triangles + present.
+	 *
+	 * world_verts: tri_count * 9 float32 — x0,y0,z0, x1,y1,z1, x2,y2,z2 per triangle.
+	 */
+	int TickTris3d(
+		std::uint32_t clear_packed,
+		const float* world_verts,
+		std::size_t tri_count,
+		std::uint32_t tri_packed);
+
+	/**
+	 * Flush pending 2D, then raster world-space filled triangles (view-proj + depth if on).
+	 */
+	void Tris3d(
+		const float* world_verts,
+		std::size_t tri_count,
+		std::uint32_t tri_packed);
+
+	/**
+	 * Screen-space filled triangles: pixel xy + NDC z in [-1,1] per vertex (float32 x9).
+	 *
+	 * Skips view-proj and frustum clip. Backface cull is off for this path.
+	 */
+	void TrisScreen(
+		const float* screen_verts,
+		std::size_t tri_count,
+		std::uint32_t tri_packed);
+
+	/**
 	 * Queue many put-pixel commands from interleaved int32 x,y pairs.
 	 */
 	void PutPixelsBuffer(const std::int32_t* xy_pairs, std::size_t count, std::uint32_t packed_color);
@@ -466,6 +509,7 @@ private:
 	FrameBuffer framebuffer_alt_{};
 	DepthBuffer depth_buffer_{};
 	bool depth_enabled_ = false;
+	bool cull_backfaces_ = true;
 	std::array<float, 16> view_proj_{
 		1.0f, 0.0f, 0.0f, 0.0f,
 		0.0f, 1.0f, 0.0f, 0.0f,
