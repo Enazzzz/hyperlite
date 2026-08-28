@@ -95,7 +95,9 @@ Interleaved 8 pairs vs post-#28 `main` on this VM (Release headless, `HYPERLITE_
 | OpenMP over vertices (64-vert chunks, ≥512 verts) | **Shipped** — mesh flat ~+3.4%, textured ~+2% (interleaved 8 pairs); emit/index loop still serial |
 | Indexed emit fast path (`emplace_back`, range loops, prefetch) | **Shipped** — mesh flat ~+2.3%; textured ~flat |
 | OpenMP over indexed emit (thread-local `ScreenTri` lists + merge, ≥4096 tris) | **Dropped** — ~−2% mesh flat on 9800-tris grid; fork + list merge overhead exceeds parallel gain |
-| SIMD batch outcode accept/reject (4–8 tris) | **Not tried** — serial fast path already near noise on headline benches |
+| SIMD batch outcode accept/reject (4–8 tris) | **Dropped** — noise/loss (#33); scalar 3-load outcode cheaper than gather+SIMD classify |
+| Screen/outcode SoA (compact outcodes, UV scratch, all-in emit) | **Dropped** — noise (~+0.3% mesh flat); screen attrs already SoA since #10; **do not retry** |
+| Clip-space SoA (`clip_x/y/z/w`) | **Dropped** — ~−2.1% mesh flat (#34); trivial-accept emit never reads clip; **do not retry** |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
 | CSR two-pass bin counts | **Dropped** — reused `vector` bins were enough; extra pass not needed |
 
@@ -146,6 +148,43 @@ Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP
 | `RasterScreenTriTile` `const ScreenTri&` + local fill geom | **Noise** — see tables above |
 | Geometry-first `ScreenTri` + flat emit without `iw` | **Noise** — no consistent mesh win |
 | Cached `area2` at emit | **Not tried** (no signal from 1–2) |
+
+## Screen/outcode SoA emit experiment (post-#29) {#screen-outcode-soa-emit}
+
+**Hypothesis:** After #29 trivial-accept emit reads only `outcodes` + screen `px/py/zw/iw` (not `clip_verts`). PR #34 SoA'd clip `x/y/z/w` and lost ~−2.1% mesh flat — extra transform traffic with no emit win. Remaining layout lever: make indexed emit gathers cheaper via compact SoA outcodes, UV `u[]`/`v[]` scratch (vs interleaved mesh UV pairs), and a bulk outcode scan → all-trivial-in emit fast path (skip per-tri outcode branches).
+
+**Context:** `MeshDrawScratch` already stores `px`/`py`/`zw`/`iw`/`outcodes` as separate arrays since transform-once (#10). `clip_verts` stays AoS `ClipVert`.
+
+**Tried:**
+
+1. **`uint8_t` outcodes** — 1 byte/vert vs `int` (AVX2 32-byte zero scan for bulk clip check).
+2. **`tex_u` / `tex_v` SoA** — deinterleave mesh UV pairs once per textured draw; indexed emit reads `tex_u[i]` / `tex_v[i]`.
+3. **`EmitIndexedFlatRangeAllIn` / `EmitIndexedTexturedRangeAllIn`** — when bulk scan finds all outcodes zero, emit loop skips per-tri outcode accept/reject.
+
+### Paired benches (this VM, interleaved 8 pairs)
+
+Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP. Baseline: `main` @ `1905fa8` (fresh before/after binaries, same session).
+
+| Bench | Before (tris/s) | After (tris/s) | Δ |
+|-------|-----------------|----------------|---|
+| `cpu_mesh_bench` flat | **7.45e6** | **7.47e6** | **~+0.3%** |
+| `cpu_mesh_bench` textured | **6.37e6** | **6.34e6** | **~−0.4%** |
+| `cpu_mesh_bench` occluded | **4.84e6** | **4.79e6** | **~−1.0%** |
+| `cpu_mesh_bench` occluded-2draw | **4.23e6** | **4.29e6** | **~+1.5%** |
+| `cpu_tri_bench` (immediate) | **9.28e6** | **9.54e6** | **~+2.7%** |
+| `cpu_tri_bench` occluded | **4.48e6** | **4.52e6** | **~+1.0%** |
+| `cpu_tri_bench` occluded-2draw | **3.89e6** | **3.98e6** | **~+2.5%** |
+
+`ctest` green on native and portable (`HYPERLITE_MARCH=x86-64`).
+
+**Outcome: not shipped.** Primary mesh flat within noise (~+0.3%); no stable ≥~2% win. On the 70×70 grid almost all tris trivial-accept, but per-tri outcode (three byte loads + two bitwise ops) is already cheaper than bulk scan + deinterleave setup. **Do not retry screen/outcode SoA** (clip-space SoA already lost in #34).
+
+| Experiment | Result |
+|------------|--------|
+| Compact `uint8_t` outcodes + AVX2 bulk scan | **Noise** — no mesh flat win |
+| UV SoA scratch (`tex_u`/`tex_v`) | **Noise** — deinterleave cost ≈ interleaved gather savings |
+| All-trivial-in indexed emit fast path | **Noise** — branch already predictable on this grid |
+| Clip-space SoA (`clip_x/y/z/w`, PR #34) | **Dropped** — ~−2.1% mesh flat; emit never reads clip on trivial-accept |
 
 ## Reproduce
 
