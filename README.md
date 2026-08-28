@@ -13,6 +13,7 @@ Super lightweight immediate-mode renderer for Python — like pygame, but you dr
 ```powershell
 .\scripts\install.ps1
 python python\examples\minimal_game.py
+python python\examples\native_game.py
 ```
 
 ### Linux
@@ -29,6 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install .
 HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print(e.backend_name())"
 # Windowed (needs DISPLAY + X11 libs):
 .venv/bin/python python/examples/minimal_game.py
+.venv/bin/python python/examples/native_game.py
 ```
 
 Or: `bash scripts/install.sh`
@@ -45,13 +47,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHYPERLITE_ENABLE_CUDA=OFF && cm
 python3 -m venv .venv && .venv/bin/pip install .
 HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print(e.backend_name())"
 .venv/bin/python python/examples/minimal_game.py
+.venv/bin/python python/examples/native_game.py
 ```
 
 Or: `bash scripts/install.sh`
 
 **Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
+**Supported platforms:** [docs/platforms.md](docs/platforms.md) — Windows / Linux / macOS matrix and requirements.  
 **macOS notes:** [docs/macos.md](docs/macos.md) — Cocoa present, GameController, Core Audio.  
-**Native game runtime (optional):** [docs/game-runtime.md](docs/game-runtime.md) — `Game.run()`, jobs, input, world, physics, audio, UI.  
+**Native game runtime (optional):** [docs/game-runtime.md](docs/game-runtime.md) — `Game.run()`, performance model, C++ vs Python surface.  
 **Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)  
 **3D wireframe (Layer 0) + filled tris (Layer 1):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md) · [docs/3d-tri-bench.md](docs/3d-tri-bench.md)  
 **Procedural continent stress game:** [docs/proc-world.md](docs/proc-world.md) — high-detail flyable bench (`python/examples/proc_world.py`).
@@ -72,7 +76,16 @@ while engine.is_running():
     engine.present()
 ```
 
-No scene graph, no sprites, no UI toolkit — just a fast framebuffer, draw commands, input, and a window (or headless present for tests/CI).
+No scene graph required — a fast framebuffer, draw commands, input, and a window (or headless present for tests/CI). Optional `hyperlite.Game.run()` lets C++ own the frame loop.
+
+Starter games:
+
+```bash
+# Python owns the loop
+python python/examples/minimal_game.py
+# C++ owns the loop (optional on_frame for the mover)
+python python/examples/native_game.py
+```
 
 ### Present modes
 
@@ -92,6 +105,7 @@ Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRE
 | `bindings/python/` | Python C extension |
 | `python/examples/` | Demos and benchmarks |
 | `docs/guide.md` | **How-to guide** |
+| `docs/platforms.md` | Supported OS / present / input / audio |
 | `docs/linux-bench.md` | Linux baseline numbers |
 | `docs/3d-plan.md` | 3D layer roadmap (wireframe → tris → mesh → GPU) |
 | `scripts/install.ps1` / `install.sh` | One-command local install |

@@ -67,3 +67,5 @@ jobs:
           assert e.is_running()
           print("python_smoke=ok", hyperlite.__file__)
           PY
+          python python/examples/native_game.py
+          python python/examples/minimal_game.py
