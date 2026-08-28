@@ -2600,6 +2600,11 @@ PyMODINIT_FUNC PyInit_hyperlite() {
 	PyModule_AddIntConstant(keys, "D", 0x44);
 	PyModule_AddIntConstant(keys, "F11", 0x7A);
 	PyModule_AddIntConstant(keys, "Return", 0x0D);
+	PyModule_AddIntConstant(keys, "Space", 0x20);
+	PyModule_AddIntConstant(keys, "Left", 0x25);
+	PyModule_AddIntConstant(keys, "Up", 0x26);
+	PyModule_AddIntConstant(keys, "Right", 0x27);
+	PyModule_AddIntConstant(keys, "Down", 0x28);
 	if (PyModule_AddObject(module, "Keys", keys) < 0) {
 		Py_DECREF(keys);
 		Py_DECREF(module);

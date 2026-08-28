@@ -1255,7 +1255,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `mouse_delta()` | `(dx, dy)` since last `poll_events` (use while captured) |
 | `mouse_button_down(button)` | bool — use `hyperlite.MouseButtons.*` |
 
-Common keys: `Keys.Escape`, `Keys.W/A/S/D`, `Keys.F11`, `Keys.Return` (see `hyperlite.Keys` in Python).
+Common keys: `Keys.Escape`, `Keys.W/A/S/D`, `Keys.Left/Up/Right/Down`, `Keys.Space`, `Keys.Tab`, `Keys.F11`, `Keys.Return` (see `hyperlite.Keys` in Python).
 
 ### Window
 
