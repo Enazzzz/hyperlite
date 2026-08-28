@@ -223,6 +223,29 @@ inline bool ProjectToPixels(
 }
 
 /**
+ * Perspective divide + viewport map without storing 1/w (flat mesh transform path).
+ */
+inline bool ProjectToPixelsNoIw(
+	const ClipVert& clip,
+	const int width,
+	const int height,
+	float& out_x,
+	float& out_y,
+	float& out_depth) {
+	if (std::fabs(clip.w) < 1e-20f) {
+		return false;
+	}
+	const float inv_w = 1.0f / clip.w;
+	const float ndc_x = clip.x * inv_w;
+	const float ndc_y = clip.y * inv_w;
+	const float ndc_z = clip.z * inv_w;
+	out_x = (ndc_x * 0.5f + 0.5f) * static_cast<float>(width);
+	out_y = (1.0f - (ndc_y * 0.5f + 0.5f)) * static_cast<float>(height);
+	out_depth = ndc_z;
+	return true;
+}
+
+/**
  * Plot one in-bounds pixel with optional depth (index already validated by clip).
  */
 inline void PlotDepthPixel(
