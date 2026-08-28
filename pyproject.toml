@@ -26,7 +26,7 @@ Documentation = "docs/guide.md"
 Source = "."
 
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61", "wheel", "cmake>=3.24"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

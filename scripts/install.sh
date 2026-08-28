@@ -22,9 +22,21 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 		echo "cmake not on PATH. Install: brew install cmake" >&2
 		exit 1
 	fi
+	if ! command -v clang++ >/dev/null 2>&1; then
+		echo "clang++ not on PATH. Install Xcode Command Line Tools: xcode-select --install" >&2
+		exit 1
+	fi
+	echo "[hyperlite] xcode-select: $(xcode-select -p 2>/dev/null || echo missing)"
+	echo "[hyperlite] clang++: $(clang++ --version 2>/dev/null | head -n 1)"
 fi
 
 echo "[hyperlite] Using Python: $PYTHON"
+if ! "$PYTHON" -c "import sysconfig, pathlib, sys; p=pathlib.Path(sysconfig.get_path('include'))/'Python.h'; sys.exit(0 if p.is_file() else 1)"; then
+	echo "Python.h not found for $PYTHON." >&2
+	echo "On macOS do not use /usr/bin/python3. Install Homebrew python:" >&2
+	echo "  brew install python && python3 -m venv .venv && .venv/bin/pip install ." >&2
+	exit 1
+fi
 "$PYTHON" -m pip install -U pip setuptools wheel
 
 if [[ "$EDITABLE" -eq 1 ]]; then

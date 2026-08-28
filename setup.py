@@ -51,8 +51,68 @@ def _find_extension() -> Path | None:
 	return None
 
 
+def _cmake_executable() -> str:
+	"""Return a cmake binary, preferring PATH then the PyPI `cmake` package."""
+	found = shutil.which("cmake")
+	if found:
+		return found
+	try:
+		import cmake as cmake_pkg
+
+		candidate = Path(cmake_pkg.CMAKE_BIN_DIR) / "cmake"
+		if candidate.is_file():
+			return str(candidate)
+	except (ImportError, AttributeError):
+		pass
+	raise RuntimeError(
+		"cmake not found. On macOS: `brew install cmake` (or `pip install cmake`). "
+		"On Linux: `sudo apt-get install cmake`."
+	)
+
+
+def _require_python_headers() -> None:
+	"""Fail early when this interpreter has no Python.h (common on macOS /usr/bin/python3)."""
+	include = sysconfig.get_path("include")
+	header = Path(include) / "Python.h" if include else None
+	if header is None or not header.is_file():
+		exe = sys.executable
+		raise RuntimeError(
+			f"Python.h not found for {exe} (looked in {include!r}). "
+			"On macOS do not use /usr/bin/python3 — install Homebrew python "
+			"(`brew install python`) or python.org, then recreate the venv."
+		)
+
+
+def _host_osx_arch() -> str | None:
+	"""Single-arch macOS slice so python.org universal2 does not dual-compile."""
+	if platform.system() != "Darwin":
+		return None
+	machine = platform.machine()
+	if machine in ("arm64", "aarch64"):
+		return "arm64"
+	if machine == "x86_64":
+		return "x86_64"
+	return None
+
+
+def _require_apple_toolchain() -> None:
+	"""Fail early on macOS when Xcode CLT / clang++ is missing."""
+	if platform.system() != "Darwin":
+		return
+	select = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True)
+	if select.returncode != 0 or not (select.stdout or "").strip():
+		raise RuntimeError(
+			"Xcode Command Line Tools are not selected. Run: xcode-select --install "
+			"(on macOS Tahoe / 26, install the matching CLT 26 package)."
+		)
+	if shutil.which("clang++") is None:
+		raise RuntimeError("clang++ not on PATH. Run: xcode-select --install")
+
+
 def _run_cmake_build() -> None:
 	"""Configure and compile the native engine via CMake."""
+	_require_apple_toolchain()
+	_require_python_headers()
 	build_type = os.environ.get("HYPERLITE_BUILD_TYPE", "Release")
 	BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -63,8 +123,9 @@ def _run_cmake_build() -> None:
 	enable_cuda = "ON"
 	if platform.system() == "Darwin" and os.environ.get("HYPERLITE_ENABLE_CUDA", "0") != "1":
 		enable_cuda = "OFF"
+	cmake = _cmake_executable()
 	cmake_cmd = [
-		"cmake",
+		cmake,
 		"-S",
 		str(ROOT),
 		"-B",
@@ -74,6 +135,9 @@ def _run_cmake_build() -> None:
 		f"-DHYPERLITE_ENABLE_CUDA={enable_cuda}",
 		f"-DPython3_EXECUTABLE={python_exe}",
 	]
+	osx_arch = _host_osx_arch()
+	if osx_arch:
+		cmake_cmd.append(f"-DCMAKE_OSX_ARCHITECTURES={osx_arch}")
 	# Prefer g++ on Linux so OpenMP (-fopenmp) links cleanly.
 	if platform.system() == "Linux" and shutil.which("g++"):
 		cmake_cmd.append("-DCMAKE_CXX_COMPILER=g++")
@@ -82,7 +146,7 @@ def _run_cmake_build() -> None:
 
 	subprocess.run(cmake_cmd, check=True)
 
-	build_cmd = ["cmake", "--build", str(BUILD_DIR), "--config", build_type, "-j", str(os.cpu_count() or 2)]
+	build_cmd = [cmake, "--build", str(BUILD_DIR), "--config", build_type, "-j", str(os.cpu_count() or 2)]
 	subprocess.run(build_cmd, check=True)
 
 
@@ -102,7 +166,11 @@ class CMakeBuildExt(build_ext):
 
 		ext_path = _find_extension()
 		if ext_path is None:
-			raise RuntimeError(f"Could not find hyperlite native module after CMake build under {BUILD_DIR}.")
+			raise RuntimeError(
+				f"Could not find hyperlite native module after CMake build under {BUILD_DIR}. "
+				"On macOS this usually means Python.h was missing — use Homebrew or python.org "
+				"Python, not /usr/bin/python3."
+			)
 
 		dest = Path(self.get_ext_fullpath("hyperlite"))
 		dest.parent.mkdir(parents=True, exist_ok=True)

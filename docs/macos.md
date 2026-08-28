@@ -23,10 +23,10 @@ Headless present (`HYPERLITE_HEADLESS=1` / `present="headless"`) works the same 
 
 | Component | Required | Notes |
 |-----------|----------|-------|
-| macOS 11+ | Yes | Apple Silicon and Intel |
-| Xcode Command Line Tools | Yes | `xcode-select --install` |
-| CMake 3.24+ | Yes | `brew install cmake` |
-| Python 3.10+ | Yes | Headers come with python.org / Homebrew python |
+| macOS 11+ | Yes | Apple Silicon (Tahoe 26 is CI) and Intel (macOS 11–15) |
+| Xcode Command Line Tools | Yes | `xcode-select --install` — must match the OS (CLT 26 on Tahoe) |
+| CMake 3.24+ | Yes | `brew install cmake` (pip also fetches a CMake wheel) |
+| Python 3.10+ | Yes | Homebrew or python.org — **not** `/usr/bin/python3` (no `Python.h`) |
 | Homebrew `libomp` | Optional | OpenMP for CPU line batches |
 | CUDA | No | Not used on macOS |
 
@@ -71,10 +71,16 @@ Windowed:
 - Framebuffer size is engine pixels. A Retina display stretches the software framebuffer; raster resolution does not follow `backingScaleFactor`.
 - `NativeHandle()` is `NSWindow*`.
 - `AudioSystem.StartOutput()` is a no-op on Linux/Windows; Mix-to-buffer still works everywhere.
-- Portable `-DHYPERLITE_MARCH=x86-64` is ignored on Apple Silicon.
+- Portable `-DHYPERLITE_MARCH=x86-64` and `-march=native` are ignored on Apple Silicon (Apple Clang often rejects `-march=` on arm64; raster is scalar there anyway).
 
 ## Troubleshooting
 
+- **`clang: error: unsupported option '-march='`:** current `main` no longer passes `-march` on Apple Silicon. Pull latest and rebuild.
+- **`Python.h` not found / skipped bindings:** `/usr/bin/python3` has no headers. `brew install python`, then `python3 -m venv .venv && .venv/bin/pip install .`.
+- **`cmake: command not found`:** `brew install cmake`. `pip install .` also pulls the PyPI `cmake` wheel as a build dependency.
+- **`xcode-select` / `invalid active developer path`:** OS upgraded to Tahoe 26 but CLT did not. Run `xcode-select --install` (or install Command Line Tools 26 from Apple Developer). Then `sudo xcode-select -s /Library/Developer/CommandLineTools`.
+- **Homebrew GCC (`g++-14`):** cannot compile Cocoa `.mm` files. Unset `CXX`/`CC` so Apple Clang is used.
+- **`brew install libomp` then link errors:** OpenMP is probed; a broken Homebrew install is ignored (line batches stay serial).
 - **No window in SSH:** Cocoa creation throws and the factory falls back to headless. Use a logged-in GUI session or `HYPERLITE_HEADLESS=1`.
 - **No sound:** `Game.run()` calls `StartOutput()`. A lone `Engine` loop does not; call `game.start_audio_output()` or mix into your own backend.
 - **Slow lines:** install `libomp` or live with the scalar OpenMP fallback — raster correctness is unchanged.
