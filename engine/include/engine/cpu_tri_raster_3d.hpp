@@ -1933,6 +1933,9 @@ inline void ProjectFanToScreen(
  * OpenMP over disjoint vertex chunks; emit + bin setup run on one thread; OpenMP fill
  * only reads bins afterward.
  */
+/** Screen-tri bin / Hi-Z / OpenMP fill tile size (framebuffer dirty tiles stay 64×64). */
+constexpr int kTriRasterTileSize = 128;
+
 struct MeshDrawScratch {
 	/** Homogeneous clip-space verts after MVP (one per mesh vertex). */
 	std::vector<ClipVert> clip_verts{};
@@ -1945,7 +1948,7 @@ struct MeshDrawScratch {
 	std::vector<float> iw{};
 	/** Emitted screen triangles for the current draw. */
 	std::vector<ScreenTri> screen{};
-	/** 64×64 tile → triangle index lists (capacity retained across frames). */
+	/** kTriRasterTileSize tile → triangle index lists (capacity retained across frames). */
 	std::vector<std::vector<std::uint32_t>> bins{};
 	/** Per-tile max stored window depth for Hi-Z reject (persisted across draws until depth clear). */
 	std::vector<float> tile_max_depth{};
@@ -2637,7 +2640,7 @@ inline bool TrisLookUniformDepthSample(const std::vector<ScreenTri>& tris) {
  *
  * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
  * behind that occluder skip the pixel loop. tile_max advances from write tracking (no
- * per-triangle 64×64 depth rescan). tile_max_depth persists across RasterScreenTrisTiled
+ * per-triangle tile depth rescan). tile_max_depth persists across RasterScreenTrisTiled
  * calls until depth is cleared (TileHiZEpoch bump). When depth is on and the draw has
  * meaningful overlap depth variation (not uniform-depth mesh, not occluder-prefix), tris
  * are sorted front-to-back before binning so nearer surfaces update tile_max first.
@@ -2652,7 +2655,7 @@ inline void RasterScreenTrisTiled(
 	auto* dst = reinterpret_cast<std::uint32_t*>(framebuffer.Data());
 	const int width = framebuffer.Width();
 	const int height = framebuffer.Height();
-	constexpr int kTile = FrameBuffer::kDirtyTileSize;
+	constexpr int kTile = kTriRasterTileSize;
 	const int tiles_x = std::max(1, (width + kTile - 1) / kTile);
 	const int tiles_y = std::max(1, (height + kTile - 1) / kTile);
 	const int tile_count = tiles_x * tiles_y;
