@@ -59,6 +59,30 @@ Interleaved 8 pairs vs pre-change `main` on this VM (Release headless, `HYPERLIT
 
 Modest flat win; indexed emit loop still dominates emit. `ctest` green native + portable.
 
+### Indexed emit fast path (follow-up)
+
+After OpenMP vertex transform (#28), the **serial indexed emit loop** (index gather → outcode accept/reject → `TryAppendScreenTri` / rare Sutherland–Hodgman) still dominates emit on the 70×70 grid (~9800 tris/draw).
+
+Shipped in `cpu_tri_raster_3d.hpp` (public API unchanged):
+
+1. **`TryAppendFlatScreenTriFast` / `TryAppendTexturedScreenTriFast`** — trivial-accept path uses `emplace_back` + direct field writes (no zero-init `ScreenTri{}` copy, skips UV/atlas work on flat).
+2. **`EmitIndexedFlatRange` / `EmitIndexedTexturedRange`** — dedicated indexed loops with outcode branching inlined, index/outcode/attr prefetch, no per-tri index bounds check (mesh load validates indices).
+3. **`AppendFlatMeshTris` / `AppendTexturedMeshTris`** — call the range emitters instead of a lambda → `EmitIndexedClipTri` per triangle.
+
+Interleaved 8 pairs vs post-#28 `main` on this VM (Release headless, `HYPERLITE_MARCH=native`, OpenMP transform + tile fill):
+
+| Bench | Before (tris/s) | After (tris/s) | Δ |
+|-------|-----------------|----------------|---|
+| `cpu_mesh_bench` flat | **11.04e6** | **11.29e6** | **~+2.3%** |
+| `cpu_mesh_bench` textured | **10.19e6** | **10.14e6** | **~flat** |
+| `cpu_mesh_bench` occluded | **7.54e6** | **7.53e6** | **~flat** |
+| `cpu_mesh_bench` occluded-2draw | **6.14e6** | **6.18e6** | **~flat** |
+| `cpu_tri_bench` (immediate) | **10.11e6** | **10.17e6** | **~flat** |
+| `cpu_tri_bench` occluded | **7.11e6** | **7.20e6** | **~flat** |
+| `cpu_tri_bench` occluded-2draw | **5.10e6** | **5.09e6** | **~flat** |
+
+`ctest` green native + portable (`HYPERLITE_MARCH=x86-64`).
+
 ## Experiments
 
 | Experiment | Result |
@@ -67,8 +91,11 @@ Modest flat win; indexed emit loop still dominates emit. `ctest` green native + 
 | AVX2+FMA 8-wide gather MVP | **Shipped** (gated); small vs scalar once-per-vert on this grid |
 | Process-static scratch (screen + bins) | **Shipped** (not TLS — Python `.so` link) |
 | Nested AABB min/max in bin | **Shipped** |
-| OpenMP over triangles | **Not tried** (forbidden without per-tile ownership) |
+| OpenMP over triangles (fill) | **Not tried** (forbidden without per-tile ownership) |
 | OpenMP over vertices (64-vert chunks, ≥512 verts) | **Shipped** — mesh flat ~+3.4%, textured ~+2% (interleaved 8 pairs); emit/index loop still serial |
+| Indexed emit fast path (`emplace_back`, range loops, prefetch) | **Shipped** — mesh flat ~+2.3%; textured ~flat |
+| OpenMP over indexed emit (thread-local `ScreenTri` lists + merge, ≥4096 tris) | **Dropped** — ~−2% mesh flat on 9800-tris grid; fork + list merge overhead exceeds parallel gain |
+| SIMD batch outcode accept/reject (4–8 tris) | **Not tried** — serial fast path already near noise on headline benches |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
 | CSR two-pass bin counts | **Dropped** — reused `vector` bins were enough; extra pass not needed |
 
