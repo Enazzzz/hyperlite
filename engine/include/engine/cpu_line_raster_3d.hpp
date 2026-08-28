@@ -86,6 +86,46 @@ inline int ComputeClipOutcode(const ClipVert& v) {
 }
 
 /**
+ * Outcodes from SoA clip xyzw (must run before perspective divide).
+ */
+inline int ComputeClipOutcodeSoA(const float x, const float y, const float z, const float w) {
+	int code = kIn;
+	if (x < -w) {
+		code |= kLeft;
+	} else if (x > w) {
+		code |= kRight;
+	}
+	if (y < -w) {
+		code |= kBottom;
+	} else if (y > w) {
+		code |= kTop;
+	}
+	if (z < -w) {
+		code |= kNear;
+	} else if (z > w) {
+		code |= kFar;
+	}
+	return code;
+}
+
+/**
+ * Gather one clip vertex from SoA clip buffers (indexed emit rare clip path).
+ */
+inline ClipVert GatherClipVert(
+	const float* clip_x,
+	const float* clip_y,
+	const float* clip_z,
+	const float* clip_w,
+	const std::size_t index) {
+	ClipVert out{};
+	out.x = clip_x[index];
+	out.y = clip_y[index];
+	out.z = clip_z[index];
+	out.w = clip_w[index];
+	return out;
+}
+
+/**
  * Lerp two clip-space vertices (homogeneous), including UV attributes.
  */
 inline ClipVert LerpClip(const ClipVert& a, const ClipVert& b, const float t) {
@@ -217,6 +257,34 @@ inline bool ProjectToPixels(
 	out_x = (ndc_x * 0.5f + 0.5f) * static_cast<float>(width);
 	out_y = (1.0f - (ndc_y * 0.5f + 0.5f)) * static_cast<float>(height);
 	// out_depth carries NDC z (= z/w); window mapping happens per-pixel.
+	out_depth = ndc_z;
+	out_inv_w = inv_w;
+	return true;
+}
+
+/**
+ * Perspective divide + viewport map from SoA clip xyzw.
+ */
+inline bool ProjectToPixelsSoA(
+	const float clip_x,
+	const float clip_y,
+	const float clip_z,
+	const float clip_w,
+	const int width,
+	const int height,
+	float& out_x,
+	float& out_y,
+	float& out_depth,
+	float& out_inv_w) {
+	if (std::fabs(clip_w) < 1e-20f) {
+		return false;
+	}
+	const float inv_w = 1.0f / clip_w;
+	const float ndc_x = clip_x * inv_w;
+	const float ndc_y = clip_y * inv_w;
+	const float ndc_z = clip_z * inv_w;
+	out_x = (ndc_x * 0.5f + 0.5f) * static_cast<float>(width);
+	out_y = (1.0f - (ndc_y * 0.5f + 0.5f)) * static_cast<float>(height);
 	out_depth = ndc_z;
 	out_inv_w = inv_w;
 	return true;

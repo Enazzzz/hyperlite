@@ -1926,9 +1926,12 @@ inline void ProjectFanToScreen(
  * only reads bins afterward.
  */
 struct MeshDrawScratch {
-	/** Homogeneous clip-space verts after MVP (one per mesh vertex). */
-	std::vector<ClipVert> clip_verts{};
-	/** Per-vert frustum outcodes matching clip_verts. */
+	/** Homogeneous clip-space x after MVP (one per mesh vertex, SoA). */
+	std::vector<float> clip_x{};
+	std::vector<float> clip_y{};
+	std::vector<float> clip_z{};
+	std::vector<float> clip_w{};
+	/** Per-vert frustum outcodes matching clip_* arrays. */
 	std::vector<int> outcodes{};
 	/** Screen attrs valid when outcodes[i] == 0 (trivial-in). */
 	std::vector<float> px{};
@@ -1976,7 +1979,10 @@ inline void TransformMeshPositionsRange(
 	const float* positions,
 	const std::size_t begin,
 	const std::size_t end,
-	ClipVert* clip_out,
+	float* clip_x_out,
+	float* clip_y_out,
+	float* clip_z_out,
+	float* clip_w_out,
 	int* codes_out,
 	float* px_out,
 	float* py_out,
@@ -2002,10 +2008,6 @@ inline void TransformMeshPositionsRange(
 	const __m256 m13 = _mm256_set1_ps(mvp[13]);
 	const __m256 m14 = _mm256_set1_ps(mvp[14]);
 	const __m256 m15 = _mm256_set1_ps(mvp[15]);
-	alignas(32) float ox[8];
-	alignas(32) float oy[8];
-	alignas(32) float oz[8];
-	alignas(32) float ow[8];
 	for (; i + 8U <= end; i += 8U) {
 		const int base = static_cast<int>(i * 3U);
 		const __m256i off = _mm256_setr_epi32(base, base + 3, base + 6, base + 9, base + 12, base + 15, base + 18, base + 21);
@@ -2016,23 +2018,24 @@ inline void TransformMeshPositionsRange(
 		const __m256 cy = _mm256_fmadd_ps(m1, vx, _mm256_fmadd_ps(m5, vy, _mm256_fmadd_ps(m9, vz, m13)));
 		const __m256 cz = _mm256_fmadd_ps(m2, vx, _mm256_fmadd_ps(m6, vy, _mm256_fmadd_ps(m10, vz, m14)));
 		const __m256 cw = _mm256_fmadd_ps(m3, vx, _mm256_fmadd_ps(m7, vy, _mm256_fmadd_ps(m11, vz, m15)));
+		_mm256_storeu_ps(clip_x_out + i, cx);
+		_mm256_storeu_ps(clip_y_out + i, cy);
+		_mm256_storeu_ps(clip_z_out + i, cz);
+		_mm256_storeu_ps(clip_w_out + i, cw);
+		alignas(32) float ox[8];
+		alignas(32) float oy[8];
+		alignas(32) float oz[8];
+		alignas(32) float ow[8];
 		_mm256_store_ps(ox, cx);
 		_mm256_store_ps(oy, cy);
 		_mm256_store_ps(oz, cz);
 		_mm256_store_ps(ow, cw);
 		for (int lane = 0; lane < 8; ++lane) {
 			const std::size_t vi = i + static_cast<std::size_t>(lane);
-			ClipVert& c = clip_out[vi];
-			c.x = ox[lane];
-			c.y = oy[lane];
-			c.z = oz[lane];
-			c.w = ow[lane];
-			c.u = 0.0f;
-			c.v = 0.0f;
-			const int code = ComputeClipOutcode(c);
+			const int code = ComputeClipOutcodeSoA(ox[lane], oy[lane], oz[lane], ow[lane]);
 			codes_out[vi] = code;
 			if (code == 0) {
-				if (!ProjectToPixels(c, width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])) {
+				if (!ProjectToPixelsSoA(ox[lane], oy[lane], oz[lane], ow[lane], width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])) {
 					codes_out[vi] = kNear;
 				}
 			}
@@ -2041,14 +2044,18 @@ inline void TransformMeshPositionsRange(
 #endif
 	for (; i < end; ++i) {
 		const float* p = positions + i * 3U;
-		ClipVert& c = clip_out[i];
-		c = MulViewProj(mvp, p[0], p[1], p[2]);
-		c.u = 0.0f;
-		c.v = 0.0f;
-		const int code = ComputeClipOutcode(c);
+		const float cx = mvp[0] * p[0] + mvp[4] * p[1] + mvp[8] * p[2] + mvp[12];
+		const float cy = mvp[1] * p[0] + mvp[5] * p[1] + mvp[9] * p[2] + mvp[13];
+		const float cz = mvp[2] * p[0] + mvp[6] * p[1] + mvp[10] * p[2] + mvp[14];
+		const float cw = mvp[3] * p[0] + mvp[7] * p[1] + mvp[11] * p[2] + mvp[15];
+		clip_x_out[i] = cx;
+		clip_y_out[i] = cy;
+		clip_z_out[i] = cz;
+		clip_w_out[i] = cw;
+		const int code = ComputeClipOutcodeSoA(cx, cy, cz, cw);
 		codes_out[i] = code;
 		if (code == 0) {
-			if (!ProjectToPixels(c, width, height, px_out[i], py_out[i], zw_out[i], iw_out[i])) {
+			if (!ProjectToPixelsSoA(cx, cy, cz, cw, width, height, px_out[i], py_out[i], zw_out[i], iw_out[i])) {
 				codes_out[i] = kNear;
 			}
 		}
@@ -2065,7 +2072,10 @@ inline void TransformMeshPositions(
 	const float* mvp,
 	const float* positions,
 	const std::size_t vertex_count,
-	ClipVert* clip_out,
+	float* clip_x_out,
+	float* clip_y_out,
+	float* clip_z_out,
+	float* clip_w_out,
 	int* codes_out,
 	float* px_out,
 	float* py_out,
@@ -2087,7 +2097,10 @@ inline void TransformMeshPositions(
 				positions,
 				begin,
 				end,
-				clip_out,
+				clip_x_out,
+				clip_y_out,
+				clip_z_out,
+				clip_w_out,
 				codes_out,
 				px_out,
 				py_out,
@@ -2104,7 +2117,10 @@ inline void TransformMeshPositions(
 		positions,
 		0U,
 		vertex_count,
-		clip_out,
+		clip_x_out,
+		clip_y_out,
+		clip_z_out,
+		clip_w_out,
 		codes_out,
 		px_out,
 		py_out,
@@ -2261,7 +2277,10 @@ inline bool TryAppendTexturedScreenTriFast(
  */
 inline void EmitIndexedClipTri(
 	std::vector<ScreenTri>& out,
-	const ClipVert* clip_verts,
+	const float* clip_x,
+	const float* clip_y,
+	const float* clip_z,
+	const float* clip_w,
 	const int* outcodes,
 	const float* px,
 	const float* py,
@@ -2312,9 +2331,9 @@ inline void EmitIndexedClipTri(
 		}
 		return;
 	}
-	ClipVert a = clip_verts[i0];
-	ClipVert b = clip_verts[i1];
-	ClipVert c = clip_verts[i2];
+	ClipVert a = GatherClipVert(clip_x, clip_y, clip_z, clip_w, i0);
+	ClipVert b = GatherClipVert(clip_x, clip_y, clip_z, clip_w, i1);
+	ClipVert c = GatherClipVert(clip_x, clip_y, clip_z, clip_w, i2);
 	a.u = u0;
 	a.v = v0;
 	b.u = u1;
@@ -2331,7 +2350,10 @@ inline void EmitIndexedClipTri(
  */
 inline void EmitIndexedFlatRange(
 	std::vector<ScreenTri>& out,
-	const ClipVert* clip_verts,
+	const float* clip_x,
+	const float* clip_y,
+	const float* clip_z,
+	const float* clip_w,
 	const int* outcodes,
 	const float* px,
 	const float* py,
@@ -2375,7 +2397,10 @@ inline void EmitIndexedFlatRange(
 		}
 		EmitIndexedClipTri(
 			out,
-			clip_verts,
+			clip_x,
+			clip_y,
+			clip_z,
+			clip_w,
 			outcodes,
 			px,
 			py,
@@ -2405,7 +2430,10 @@ inline void EmitIndexedFlatRange(
  */
 inline void EmitIndexedTexturedRange(
 	std::vector<ScreenTri>& out,
-	const ClipVert* clip_verts,
+	const float* clip_x,
+	const float* clip_y,
+	const float* clip_z,
+	const float* clip_w,
 	const int* outcodes,
 	const float* px,
 	const float* py,
@@ -2459,7 +2487,10 @@ inline void EmitIndexedTexturedRange(
 		}
 		EmitIndexedClipTri(
 			out,
-			clip_verts,
+			clip_x,
+			clip_y,
+			clip_z,
+			clip_w,
 			outcodes,
 			px,
 			py,
@@ -2943,7 +2974,10 @@ inline void AppendFlatMeshTris(
 	if (positions == nullptr || mvp16 == nullptr || vertex_count < 3U) {
 		return;
 	}
-	scratch.clip_verts.resize(vertex_count);
+	scratch.clip_x.resize(vertex_count);
+	scratch.clip_y.resize(vertex_count);
+	scratch.clip_z.resize(vertex_count);
+	scratch.clip_w.resize(vertex_count);
 	scratch.outcodes.resize(vertex_count);
 	scratch.px.resize(vertex_count);
 	scratch.py.resize(vertex_count);
@@ -2953,7 +2987,10 @@ inline void AppendFlatMeshTris(
 		mvp16,
 		positions,
 		vertex_count,
-		scratch.clip_verts.data(),
+		scratch.clip_x.data(),
+		scratch.clip_y.data(),
+		scratch.clip_z.data(),
+		scratch.clip_w.data(),
 		scratch.outcodes.data(),
 		scratch.px.data(),
 		scratch.py.data(),
@@ -2962,7 +2999,10 @@ inline void AppendFlatMeshTris(
 		width,
 		height);
 
-	const detail3d::ClipVert* clip_verts = scratch.clip_verts.data();
+	const float* clip_x = scratch.clip_x.data();
+	const float* clip_y = scratch.clip_y.data();
+	const float* clip_z = scratch.clip_z.data();
+	const float* clip_w = scratch.clip_w.data();
 	const int* codes = scratch.outcodes.data();
 	const float* px = scratch.px.data();
 	const float* py = scratch.py.data();
@@ -2974,7 +3014,10 @@ inline void AppendFlatMeshTris(
 		screen.reserve(screen.size() + tri_count);
 		detail3d::EmitIndexedFlatRange(
 			screen,
-			clip_verts,
+			clip_x,
+			clip_y,
+			clip_z,
+			clip_w,
 			codes,
 			px,
 			py,
@@ -3012,7 +3055,10 @@ inline void AppendFlatMeshTris(
 			}
 			detail3d::EmitIndexedClipTri(
 				screen,
-				clip_verts,
+				clip_x,
+				clip_y,
+				clip_z,
+				clip_w,
 				codes,
 				px,
 				py,
@@ -3062,7 +3108,10 @@ inline void AppendTexturedMeshTris(
 	if (atlas_rgba == nullptr || atlas_w <= 0 || atlas_h <= 0) {
 		return;
 	}
-	scratch.clip_verts.resize(vertex_count);
+	scratch.clip_x.resize(vertex_count);
+	scratch.clip_y.resize(vertex_count);
+	scratch.clip_z.resize(vertex_count);
+	scratch.clip_w.resize(vertex_count);
 	scratch.outcodes.resize(vertex_count);
 	scratch.px.resize(vertex_count);
 	scratch.py.resize(vertex_count);
@@ -3072,7 +3121,10 @@ inline void AppendTexturedMeshTris(
 		mvp16,
 		positions,
 		vertex_count,
-		scratch.clip_verts.data(),
+		scratch.clip_x.data(),
+		scratch.clip_y.data(),
+		scratch.clip_z.data(),
+		scratch.clip_w.data(),
 		scratch.outcodes.data(),
 		scratch.px.data(),
 		scratch.py.data(),
@@ -3082,7 +3134,10 @@ inline void AppendTexturedMeshTris(
 		height);
 
 	constexpr std::uint32_t kUnusedFlat = 0xFFFFFFFFU;
-	const detail3d::ClipVert* clip_verts = scratch.clip_verts.data();
+	const float* clip_x = scratch.clip_x.data();
+	const float* clip_y = scratch.clip_y.data();
+	const float* clip_z = scratch.clip_z.data();
+	const float* clip_w = scratch.clip_w.data();
 	const int* codes = scratch.outcodes.data();
 	const float* px = scratch.px.data();
 	const float* py = scratch.py.data();
@@ -3094,7 +3149,10 @@ inline void AppendTexturedMeshTris(
 		screen.reserve(screen.size() + tri_count);
 		detail3d::EmitIndexedTexturedRange(
 			screen,
-			clip_verts,
+			clip_x,
+			clip_y,
+			clip_z,
+			clip_w,
 			codes,
 			px,
 			py,
@@ -3142,7 +3200,10 @@ inline void AppendTexturedMeshTris(
 			}
 			detail3d::EmitIndexedClipTri(
 				screen,
-				clip_verts,
+				clip_x,
+				clip_y,
+				clip_z,
+				clip_w,
 				codes,
 				px,
 				py,
