@@ -116,6 +116,10 @@ public:
 	void RequestQuit() { quit_ = true; }
 	bool QuitRequested() const { return quit_; }
 
+	/** Open platform audio output (Core Audio on macOS). No-op elsewhere. */
+	bool StartAudioOutput() { return audio_.StartOutput(); }
+	void StopAudioOutput() { audio_.StopOutput(); }
+
 	double DeltaTime() const { return dt_; }
 	std::uint64_t FrameIndex() const { return frame_index_; }
 

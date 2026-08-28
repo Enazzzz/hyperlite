@@ -1,7 +1,7 @@
 """Local install helper for the Hyperlite native Python extension.
 
 Builds the C++/CUDA engine with CMake, then packages ``hyperlite.pyd`` (Windows)
-or ``hyperlite*.so`` (Linux) for ``pip install .`` (local only — not published to PyPI).
+or ``hyperlite*.so`` (Linux / macOS) for ``pip install .`` (local only — not published to PyPI).
 """
 
 from __future__ import annotations
@@ -59,6 +59,10 @@ def _run_cmake_build() -> None:
 	# Always bind the extension to the Python running pip — reusing a CMake cache
 	# built for a different interpreter produces a module linked to the wrong runtime.
 	python_exe = Path(sys.executable).resolve()
+	# macOS has no CUDA on Apple Silicon; skip the toolkit probe unless forced.
+	enable_cuda = "ON"
+	if platform.system() == "Darwin" and os.environ.get("HYPERLITE_ENABLE_CUDA", "0") != "1":
+		enable_cuda = "OFF"
 	cmake_cmd = [
 		"cmake",
 		"-S",
@@ -67,12 +71,14 @@ def _run_cmake_build() -> None:
 		str(BUILD_DIR),
 		f"-DCMAKE_BUILD_TYPE={build_type}",
 		"-DHYPERLITE_BUILD_PYTHON_BINDINGS=ON",
-		"-DHYPERLITE_ENABLE_CUDA=ON",
+		f"-DHYPERLITE_ENABLE_CUDA={enable_cuda}",
 		f"-DPython3_EXECUTABLE={python_exe}",
 	]
 	# Prefer g++ on Linux so OpenMP (-fopenmp) links cleanly.
 	if platform.system() == "Linux" and shutil.which("g++"):
 		cmake_cmd.append("-DCMAKE_CXX_COMPILER=g++")
+	elif platform.system() == "Darwin" and shutil.which("clang++"):
+		cmake_cmd.append("-DCMAKE_CXX_COMPILER=clang++")
 
 	subprocess.run(cmake_cmd, check=True)
 

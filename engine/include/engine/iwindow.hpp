@@ -24,8 +24,9 @@ enum class PresentMode {
 /**
  * Platform window + present surface used by Engine.
  *
- * Windows implements this with Win32 + GDI; Linux with X11 or a headless stub.
- * DXGI remains a Windows-only overlay on top of the window native handle.
+ * Windows implements this with Win32 + GDI; Linux with X11; macOS with Cocoa
+ * (layer blit of host RGBA8 — no Metal/GL raster). DXGI remains a Windows-only
+ * overlay on top of the window native handle.
  */
 class IWindow {
 public:
@@ -58,7 +59,7 @@ public:
 	/** True while the window (or headless session) is still valid. */
 	virtual bool IsAlive() const = 0;
 
-	/** Native OS handle (HWND / Display*+Window), or nullptr when headless. */
+	/** Native OS handle (HWND / NSWindow* / Display*), or nullptr when headless. */
 	virtual void* NativeHandle() const = 0;
 
 	/** Client width in pixels. */
