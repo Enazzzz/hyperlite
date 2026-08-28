@@ -1851,25 +1851,28 @@ inline void TryAppendScreenTri(
 	tri.x0 = x0;
 	tri.y0 = y0;
 	tri.zw0 = zw0;
-	tri.iw0 = iw0;
 	tri.u0 = u0;
 	tri.v0 = v0;
 	tri.x1 = x1;
 	tri.y1 = y1;
 	tri.zw1 = zw1;
-	tri.iw1 = iw1;
 	tri.u1 = u1;
 	tri.v1 = v1;
 	tri.x2 = x2;
 	tri.y2 = y2;
 	tri.zw2 = zw2;
-	tri.iw2 = iw2;
 	tri.u2 = u2;
 	tri.v2 = v2;
 	tri.color = color;
 	tri.atlas_rgba = atlas_rgba;
 	tri.atlas_w = atlas_w;
 	tri.atlas_h = atlas_h;
+	const bool textured = atlas_rgba != nullptr && atlas_w > 0 && atlas_h > 0;
+	if (textured) {
+		tri.iw0 = iw0;
+		tri.iw1 = iw1;
+		tri.iw2 = iw2;
+	}
 	out.push_back(tri);
 }
 
@@ -1896,8 +1899,13 @@ inline void ProjectFanToScreen(
 	float iw[16];
 	float uu[16];
 	float vv[16];
+	const bool textured = atlas_rgba != nullptr && atlas_w > 0 && atlas_h > 0;
 	for (int i = 0; i < count; ++i) {
-		if (!ProjectToPixels(verts[i], width, height, px[i], py[i], zw[i], iw[i])) {
+		if (textured) {
+			if (!ProjectToPixels(verts[i], width, height, px[i], py[i], zw[i], iw[i])) {
+				return;
+			}
+		} else if (!ProjectToPixelsNoIw(verts[i], width, height, px[i], py[i], zw[i])) {
 			return;
 		}
 		uu[i] = verts[i].u;
@@ -1906,9 +1914,9 @@ inline void ProjectFanToScreen(
 	for (int i = 1; i + 1 < count; ++i) {
 		TryAppendScreenTri(
 			out,
-			px[0], py[0], zw[0], iw[0], uu[0], vv[0],
-			px[i], py[i], zw[i], iw[i], uu[i], vv[i],
-			px[i + 1], py[i + 1], zw[i + 1], iw[i + 1], uu[i + 1], vv[i + 1],
+			px[0], py[0], zw[0], textured ? iw[0] : 1.0f, uu[0], vv[0],
+			px[i], py[i], zw[i], textured ? iw[i] : 1.0f, uu[i], vv[i],
+			px[i + 1], py[i + 1], zw[i + 1], textured ? iw[i + 1] : 1.0f, uu[i + 1], vv[i + 1],
 			color,
 			cull_backfaces,
 			atlas_rgba,
@@ -1969,6 +1977,7 @@ constexpr std::size_t kTransformChunkVerts = 64U;
 /**
  * Transform vertices [begin, end) through MVP; write clip + outcodes (+ project when trivial-in).
  *
+ * When iw_out is non-null, also stores 1/w for textured emit; flat mesh passes null and skips iw.
  * AVX2 8-wide AoS gather when __AVX2__ && __FMA__; scalar remainder / portable build.
  */
 inline void TransformMeshPositionsRange(
@@ -1984,6 +1993,7 @@ inline void TransformMeshPositionsRange(
 	float* iw_out,
 	const int width,
 	const int height) {
+	const bool store_iw = iw_out != nullptr;
 	std::size_t i = begin;
 #if defined(__AVX2__) && defined(__FMA__)
 	const __m256 m0 = _mm256_set1_ps(mvp[0]);
@@ -2032,7 +2042,10 @@ inline void TransformMeshPositionsRange(
 			const int code = ComputeClipOutcode(c);
 			codes_out[vi] = code;
 			if (code == 0) {
-				if (!ProjectToPixels(c, width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])) {
+				const bool projected = store_iw
+					? ProjectToPixels(c, width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])
+					: ProjectToPixelsNoIw(c, width, height, px_out[vi], py_out[vi], zw_out[vi]);
+				if (!projected) {
 					codes_out[vi] = kNear;
 				}
 			}
@@ -2048,7 +2061,10 @@ inline void TransformMeshPositionsRange(
 		const int code = ComputeClipOutcode(c);
 		codes_out[i] = code;
 		if (code == 0) {
-			if (!ProjectToPixels(c, width, height, px_out[i], py_out[i], zw_out[i], iw_out[i])) {
+			const bool projected = store_iw
+				? ProjectToPixels(c, width, height, px_out[i], py_out[i], zw_out[i], iw_out[i])
+				: ProjectToPixelsNoIw(c, width, height, px_out[i], py_out[i], zw_out[i]);
+			if (!projected) {
 				codes_out[i] = kNear;
 			}
 		}
@@ -2058,7 +2074,8 @@ inline void TransformMeshPositionsRange(
 /**
  * Transform mesh positions through column-major MVP; write clip + outcodes.
  *
- * When outcode == 0, also perspective-divides into px/py/zw/iw (project once per vert).
+ * When outcode == 0, also perspective-divides into px/py/zw (project once per vert).
+ * When iw_out is non-null, also stores 1/w for textured emit; flat mesh passes null and skips iw.
  * Large meshes use OpenMP over 64-vert chunks (disjoint scratch writes); small meshes stay serial.
  */
 inline void TransformMeshPositions(
@@ -2156,15 +2173,12 @@ inline bool TryAppendFlatScreenTriFast(
 	const float x0,
 	const float y0,
 	const float zw0,
-	const float iw0,
 	const float x1,
 	const float y1,
 	const float zw1,
-	const float iw1,
 	const float x2,
 	const float y2,
 	const float zw2,
-	const float iw2,
 	const std::uint32_t color,
 	const bool cull_backfaces) {
 	const float area = ScreenSignedArea2(x0, y0, x1, y1, x2, y2);
@@ -2179,15 +2193,12 @@ inline bool TryAppendFlatScreenTriFast(
 	tri.x0 = x0;
 	tri.y0 = y0;
 	tri.zw0 = zw0;
-	tri.iw0 = iw0;
 	tri.x1 = x1;
 	tri.y1 = y1;
 	tri.zw1 = zw1;
-	tri.iw1 = iw1;
 	tri.x2 = x2;
 	tri.y2 = y2;
 	tri.zw2 = zw2;
-	tri.iw2 = iw2;
 	tri.color = color;
 	return true;
 }
@@ -2283,6 +2294,10 @@ inline void EmitIndexedClipTri(
 	const std::uint8_t* atlas_rgba,
 	const int atlas_w,
 	const int atlas_h) {
+	const bool textured = atlas_rgba != nullptr && atlas_w > 0 && atlas_h > 0;
+	if (textured && iw == nullptr) {
+		return;
+	}
 	const int ca = outcodes[i0];
 	const int cb = outcodes[i1];
 	const int cc = outcodes[i2];
@@ -2293,9 +2308,9 @@ inline void EmitIndexedClipTri(
 		if (atlas_rgba == nullptr) {
 			TryAppendFlatScreenTriFast(
 				out,
-				px[i0], py[i0], zw[i0], iw[i0],
-				px[i1], py[i1], zw[i1], iw[i1],
-				px[i2], py[i2], zw[i2], iw[i2],
+				px[i0], py[i0], zw[i0],
+				px[i1], py[i1], zw[i1],
+				px[i2], py[i2], zw[i2],
 				color,
 				cull_backfaces);
 		} else {
@@ -2336,7 +2351,6 @@ inline void EmitIndexedFlatRange(
 	const float* px,
 	const float* py,
 	const float* zw,
-	const float* iw,
 	const std::uint32_t* indices,
 	const std::size_t tri_begin,
 	const std::size_t tri_end,
@@ -2366,9 +2380,9 @@ inline void EmitIndexedFlatRange(
 		if ((ca | cb | cc) == 0) {
 			TryAppendFlatScreenTriFast(
 				out,
-				px[i0], py[i0], zw[i0], iw[i0],
-				px[i1], py[i1], zw[i1], iw[i1],
-				px[i2], py[i2], zw[i2], iw[i2],
+				px[i0], py[i0], zw[i0],
+				px[i1], py[i1], zw[i1],
+				px[i2], py[i2], zw[i2],
 				color,
 				cull_backfaces);
 			continue;
@@ -2380,7 +2394,7 @@ inline void EmitIndexedFlatRange(
 			px,
 			py,
 			zw,
-			iw,
+			nullptr,
 			i0,
 			i1,
 			i2,
@@ -2948,7 +2962,6 @@ inline void AppendFlatMeshTris(
 	scratch.px.resize(vertex_count);
 	scratch.py.resize(vertex_count);
 	scratch.zw.resize(vertex_count);
-	scratch.iw.resize(vertex_count);
 	detail3d::TransformMeshPositions(
 		mvp16,
 		positions,
@@ -2958,7 +2971,7 @@ inline void AppendFlatMeshTris(
 		scratch.px.data(),
 		scratch.py.data(),
 		scratch.zw.data(),
-		scratch.iw.data(),
+		nullptr,
 		width,
 		height);
 
@@ -2967,7 +2980,6 @@ inline void AppendFlatMeshTris(
 	const float* px = scratch.px.data();
 	const float* py = scratch.py.data();
 	const float* zw = scratch.zw.data();
-	const float* iw = scratch.iw.data();
 
 	if (index_count > 0U && indices != nullptr) {
 		const std::size_t tri_count = index_count / 3U;
@@ -2979,7 +2991,6 @@ inline void AppendFlatMeshTris(
 			px,
 			py,
 			zw,
-			iw,
 			indices,
 			0U,
 			tri_count,
@@ -3003,9 +3014,9 @@ inline void AppendFlatMeshTris(
 			if ((ca | cb | cc) == 0) {
 				detail3d::TryAppendFlatScreenTriFast(
 					screen,
-					px[i0], py[i0], zw[i0], iw[i0],
-					px[i1], py[i1], zw[i1], iw[i1],
-					px[i2], py[i2], zw[i2], iw[i2],
+					px[i0], py[i0], zw[i0],
+					px[i1], py[i1], zw[i1],
+					px[i2], py[i2], zw[i2],
 					tri_color,
 					cull_backfaces);
 				continue;
@@ -3017,7 +3028,7 @@ inline void AppendFlatMeshTris(
 				px,
 				py,
 				zw,
-				iw,
+				nullptr,
 				i0,
 				i1,
 				i2,
