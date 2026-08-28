@@ -1958,6 +1958,8 @@ struct MeshDrawScratch {
 	std::vector<std::uint32_t> tri_order{};
 	/** Cached min window depth per tri (parallel to tri_order / draw list). */
 	std::vector<float> tri_min_depth{};
+	/** Per-tile flag: raster wrote depth this draw (defer Hi-Z merge → one scan at draw end). */
+	std::vector<std::uint8_t> tile_hiz_dirty{};
 };
 
 /**
@@ -2612,6 +2614,67 @@ inline bool ShouldSortTrisFrontToBack(
 }
 
 /**
+ * Hi-Z merge strategy for draws that skip front-to-back sort.
+ */
+enum class HiZDeferMode {
+	/** Per-write merge (overlapping / occluder-prefix draws). */
+	None,
+	/** Uniform depth: one merge per tile is enough (same farthest z). */
+	UniformOncePerTile,
+	/** Coplanar layer: defer to one depth scan per touched tile at draw end. */
+	CoplanarRebuild,
+};
+
+/**
+ * Classify uniform vs coplanar draws that skip front-to-back sort.
+ *
+ * Occluder-prefix draws return None — they still need per-write merge so later
+ * tris see a tight tile_max during the same draw.
+ */
+inline HiZDeferMode ClassifyHiZDeferDraw(
+	const std::size_t tri_count,
+	const std::vector<float>& tri_min_depth) {
+	if (tri_count <= 1U || tri_min_depth.size() != tri_count) {
+		return HiZDeferMode::UniformOncePerTile;
+	}
+	float depth_min = tri_min_depth[0];
+	float depth_max = tri_min_depth[0];
+	for (std::size_t i = 1U; i < tri_count; ++i) {
+		const float d = tri_min_depth[i];
+		depth_min = std::min(depth_min, d);
+		depth_max = std::max(depth_max, d);
+	}
+	constexpr float kUniformDepthEps = 1e-5f;
+	if (depth_max - depth_min <= kUniformDepthEps) {
+		return HiZDeferMode::UniformOncePerTile;
+	}
+	constexpr float kNearMinDepthEps = 1e-5f;
+	int near_min_count = 0;
+	for (std::size_t i = 0U; i < tri_count; ++i) {
+		if (tri_min_depth[i] <= depth_min + kNearMinDepthEps) {
+			++near_min_count;
+		}
+	}
+	if (static_cast<std::size_t>(near_min_count) * 4U > tri_count) {
+		return HiZDeferMode::CoplanarRebuild;
+	}
+	return HiZDeferMode::None;
+}
+
+/**
+ * True when in-draw Hi-Z merge can be deferred to one tile scan at draw end.
+ *
+ * Matches uniform-depth and coplanar cases that skip front-to-back sort. Occluder-prefix
+ * draws (few tris at min depth + large back field) still need per-write merge so later
+ * tris see a tight tile_max during the same draw.
+ */
+inline bool IsUniformOrCoplanarDepthDraw(
+	const std::size_t tri_count,
+	const std::vector<float>& tri_min_depth) {
+	return ClassifyHiZDeferDraw(tri_count, tri_min_depth) != HiZDeferMode::None;
+}
+
+/**
  * Cheap uniform-depth probe on a few tris (flat mesh skips full min-depth pass).
  */
 inline bool TrisLookUniformDepthSample(const std::vector<ScreenTri>& tris) {
@@ -2641,9 +2704,9 @@ inline bool TrisLookUniformDepthSample(const std::vector<ScreenTri>& tris) {
  * Depth-on: per-tile Hi-Z tracks max stored depth; triangles whose nearest tile z is
  * behind that occluder skip the pixel loop. tile_max advances from write tracking (no
  * per-triangle tile depth rescan). tile_max_depth persists across RasterScreenTrisTiled
- * calls until depth is cleared (TileHiZEpoch bump). When depth is on and the draw has
- * meaningful overlap depth variation (not uniform-depth mesh, not occluder-prefix), tris
- * are sorted front-to-back before binning so nearer surfaces update tile_max first.
+ * calls until depth is cleared (TileHiZEpoch bump). Uniform draws merge Hi-Z once per tile;
+ * coplanar draws rebuild touched tiles via ScanTileMaxDepth at draw end. Overlapping draws
+ * with front-to-back sort keep per-write merge for in-draw Hi-Z reject.
  */
 inline void RasterScreenTrisTiled(
 	FrameBuffer& framebuffer,
@@ -2698,11 +2761,27 @@ inline void RasterScreenTrisTiled(
 		tri_order[i] = static_cast<std::uint32_t>(i);
 	}
 	bool sort_front_to_back = false;
-	if (depth_on && tri_count > 1U && !TrisLookUniformDepthSample(tris)) {
-		for (std::size_t i = 0U; i < tri_count; ++i) {
-			tri_min_depth[i] = TriMinWindowDepthVertices(tris[i]);
+	HiZDeferMode hiz_defer = HiZDeferMode::None;
+	if (depth_on && tri_count > 1U) {
+		if (TrisLookUniformDepthSample(tris)) {
+			hiz_defer = HiZDeferMode::UniformOncePerTile;
+		} else {
+			for (std::size_t i = 0U; i < tri_count; ++i) {
+				tri_min_depth[i] = TriMinWindowDepthVertices(tris[i]);
+			}
+			sort_front_to_back = ShouldSortTrisFrontToBack(tri_count, tri_min_depth);
+			if (!sort_front_to_back) {
+				hiz_defer = ClassifyHiZDeferDraw(tri_count, tri_min_depth);
+			}
 		}
-		sort_front_to_back = ShouldSortTrisFrontToBack(tri_count, tri_min_depth);
+	}
+	auto& tile_hiz_dirty = scratch.tile_hiz_dirty;
+	if (hiz_defer != HiZDeferMode::None) {
+		if (static_cast<int>(tile_hiz_dirty.size()) != tile_count) {
+			tile_hiz_dirty.assign(static_cast<std::size_t>(tile_count), 0);
+		} else {
+			std::fill(tile_hiz_dirty.begin(), tile_hiz_dirty.end(), 0);
+		}
 	}
 	if (sort_front_to_back) {
 		std::sort(tri_order.begin(), tri_order.end(), [&tri_min_depth](const std::uint32_t a, const std::uint32_t b) {
@@ -2789,7 +2868,16 @@ inline void RasterScreenTrisTiled(
 					tile_oc,
 					&tri_write_max)) {
 				if (depth_on) {
-					MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+					if (hiz_defer == HiZDeferMode::CoplanarRebuild) {
+						tile_hiz_dirty[static_cast<std::size_t>(tile)] = 1;
+					} else if (hiz_defer == HiZDeferMode::UniformOncePerTile) {
+						if (tile_hiz_dirty[static_cast<std::size_t>(tile)] == 0) {
+							MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+							tile_hiz_dirty[static_cast<std::size_t>(tile)] = 1;
+						}
+					} else {
+						MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+					}
 				}
 			}
 		}
@@ -2835,12 +2923,38 @@ inline void RasterScreenTrisTiled(
 					tile_oc,
 					&tri_write_max)) {
 				if (depth_on) {
-					MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+					if (hiz_defer == HiZDeferMode::CoplanarRebuild) {
+						tile_hiz_dirty[static_cast<std::size_t>(tile)] = 1;
+					} else if (hiz_defer == HiZDeferMode::UniformOncePerTile) {
+						if (tile_hiz_dirty[static_cast<std::size_t>(tile)] == 0) {
+							MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+							tile_hiz_dirty[static_cast<std::size_t>(tile)] = 1;
+						}
+					} else {
+						MergeTileHiZFromWrite(tile_max, tile_hiz_scanned, tri_write_max);
+					}
 				}
 			}
 		}
 	}
 #endif
+
+	if (hiz_defer == HiZDeferMode::CoplanarRebuild && depth_on) {
+		const float* depth_base = depth->Data();
+		for (int tile = 0; tile < tile_count; ++tile) {
+			if (tile_hiz_dirty[static_cast<std::size_t>(tile)] == 0) {
+				continue;
+			}
+			const int tx = tile % tiles_x;
+			const int ty = tile / tiles_x;
+			const int hx0 = tx * kTile;
+			const int hy0 = ty * kTile;
+			const int hx1 = std::min(hx0 + kTile, width);
+			const int hy1 = std::min(hy0 + kTile, height);
+			tile_max_depth[static_cast<std::size_t>(tile)] =
+				ScanTileMaxDepth(depth_base, width, hx0, hy0, hx1, hy1);
+		}
+	}
 
 	if (global_bounds.valid) {
 		framebuffer.NoteDirtyRect(
