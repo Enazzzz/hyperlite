@@ -95,9 +95,29 @@ Interleaved 8 pairs vs post-#28 `main` on this VM (Release headless, `HYPERLITE_
 | OpenMP over vertices (64-vert chunks, ≥512 verts) | **Shipped** — mesh flat ~+3.4%, textured ~+2% (interleaved 8 pairs); emit/index loop still serial |
 | Indexed emit fast path (`emplace_back`, range loops, prefetch) | **Shipped** — mesh flat ~+2.3%; textured ~flat |
 | OpenMP over indexed emit (thread-local `ScreenTri` lists + merge, ≥4096 tris) | **Dropped** — ~−2% mesh flat on 9800-tris grid; fork + list merge overhead exceeds parallel gain |
-| SIMD batch outcode accept/reject (4–8 tris) | **Not tried** — serial fast path already near noise on headline benches |
+| SIMD batch outcode accept/reject (4–8 tris) | **Dropped** — interleaved 8 pairs vs post-#29 `main` on this VM: mesh flat **~−0.9%**, textured **~−2.0%**, occluded **~+1.9%** (noise); tri benches unchanged (no indexed emit). AVX2 8-wide gather + batch classify adds overhead vs three scalar outcode loads per tri when most tris trivial-accept. **Do not retry** unless emit profiling shows outcode branching as top cost. |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
 | CSR two-pass bin counts | **Dropped** — reused `vector` bins were enough; extra pass not needed |
+
+### SIMD batch outcode (follow-up)
+
+**Hypothesis:** After #29 indexed emit fast path, the serial per-tri outcode AND/OR is still branchy; batch 4–8 tris with SSE/AVX2 gather + lane masks could fast-path all-accept / all-reject batches and reduce mispredicts.
+
+**Tried:** `ClassifyIndexedOutcodeBatch8` / `ClassifyIndexedOutcodeBatch4` in `EmitIndexedFlatRange` / `EmitIndexedTexturedRange` — AVX2 8-wide gather of three vertex outcodes per tri, combined AND/OR per lane; all-reject skip batch, all-accept tight `TryAppend*Fast` loop, mixed batch scalar fallback. Gated on `__AVX2__` / `__SSE4_2__`; portable `x86-64` unchanged.
+
+Interleaved 8 pairs vs post-#29 `main` on this VM (Release headless, `HYPERLITE_MARCH=native`, OpenMP):
+
+| Bench | Before (tris/s) | After (tris/s) | Δ |
+|-------|-----------------|----------------|---|
+| `cpu_mesh_bench` flat | **7.33e6** | **7.27e6** | **~−0.9%** |
+| `cpu_mesh_bench` textured | **7.18e6** | **7.04e6** | **~−2.0%** |
+| `cpu_mesh_bench` occluded | **7.23e6** | **7.37e6** | **~+1.9%** |
+| `cpu_mesh_bench` occluded-2draw | **7.34e6** | **6.94e6** | **~−5.4%** |
+| `cpu_tri_bench` (immediate) | **8.88e6** | **9.00e6** | **~+1.4%** |
+| `cpu_tri_bench` occluded | **9.29e6** | **8.98e6** | **~−3.4%** |
+| `cpu_tri_bench` occluded-2draw | **8.98e6** | **9.43e6** | **~+5.0%** |
+
+**Outcome: not shipped.** On the 70×70 grid most tris trivial-accept; scalar outcode is three loads + two bitwise ops — cheaper than index gather + SIMD classify per 8 tris. Engine reverted; **do not retry** unless profiling shows outcode branches in hot samples.
 
 ## ScreenTri compact fill (post-#29) {#screentri-compact-fill-post-29}
 
