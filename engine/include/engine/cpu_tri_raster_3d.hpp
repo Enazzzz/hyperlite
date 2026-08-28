@@ -1921,8 +1921,9 @@ inline void ProjectFanToScreen(
  * Per-draw scratch for mesh transform / emit / tile bins (reused across draws).
  *
  * Process-static via GetMeshDrawScratch() so DrawMesh / TickMesh avoid per-frame heap
- * churn without TLS (which breaks non-PIC static → Python .so links). Emit + bin setup
- * run on one thread; OpenMP only reads bins afterward.
+ * churn without TLS (which breaks non-PIC static → Python .so links). Transform may use
+ * OpenMP over disjoint vertex chunks; emit + bin setup run on one thread; OpenMP fill
+ * only reads bins afterward.
  */
 struct MeshDrawScratch {
 	/** Homogeneous clip-space verts after MVP (one per mesh vertex). */
@@ -1952,23 +1953,29 @@ struct MeshDrawScratch {
  * Process-wide mesh scratch (emit + bin setup are single-threaded before OpenMP fill).
  *
  * Not thread_local: TLS in a non-PIC static archive fails when linking the Python .so
- * (R_X86_64_TPOFF32). OpenMP workers only read bins after this thread finishes binning.
+ * (R_X86_64_TPOFF32). Transform writes disjoint vertex ranges in parallel; emit/bin
+ * and OpenMP tile fill follow on the calling thread / tile workers respectively.
  */
 inline MeshDrawScratch& GetMeshDrawScratch() {
 	static MeshDrawScratch scratch;
 	return scratch;
 }
 
+/** Minimum mesh vertex count before OpenMP transform amortizes fork overhead. */
+constexpr std::size_t kMinVertsForOmpTransform = 512U;
+/** Vertices per OpenMP chunk (disjoint writes; AVX2 inner loop per chunk). */
+constexpr std::size_t kTransformChunkVerts = 64U;
+
 /**
- * Transform mesh positions through column-major MVP; write clip + outcodes.
+ * Transform vertices [begin, end) through MVP; write clip + outcodes (+ project when trivial-in).
  *
- * When outcode == 0, also perspective-divides into px/py/zw/iw (project once per vert).
- * AVX2 path gathers 8 AoS xyz lanes when __AVX2__ is defined; scalar remainder / portable.
+ * AVX2 8-wide AoS gather when __AVX2__ && __FMA__; scalar remainder / portable build.
  */
-inline void TransformMeshPositions(
+inline void TransformMeshPositionsRange(
 	const float* mvp,
 	const float* positions,
-	const std::size_t vertex_count,
+	const std::size_t begin,
+	const std::size_t end,
 	ClipVert* clip_out,
 	int* codes_out,
 	float* px_out,
@@ -1977,8 +1984,7 @@ inline void TransformMeshPositions(
 	float* iw_out,
 	const int width,
 	const int height) {
-	std::size_t i = 0U;
-	// 8-wide AoS gather + mat4 needs AVX2+FMA (native Release). Portable/x86-64 stays scalar.
+	std::size_t i = begin;
 #if defined(__AVX2__) && defined(__FMA__)
 	const __m256 m0 = _mm256_set1_ps(mvp[0]);
 	const __m256 m1 = _mm256_set1_ps(mvp[1]);
@@ -2000,7 +2006,7 @@ inline void TransformMeshPositions(
 	alignas(32) float oy[8];
 	alignas(32) float oz[8];
 	alignas(32) float ow[8];
-	for (; i + 8U <= vertex_count; i += 8U) {
+	for (; i + 8U <= end; i += 8U) {
 		const int base = static_cast<int>(i * 3U);
 		const __m256i off = _mm256_setr_epi32(base, base + 3, base + 6, base + 9, base + 12, base + 15, base + 18, base + 21);
 		const __m256 vx = _mm256_i32gather_ps(positions, off, 4);
@@ -2027,14 +2033,13 @@ inline void TransformMeshPositions(
 			codes_out[vi] = code;
 			if (code == 0) {
 				if (!ProjectToPixels(c, width, height, px_out[vi], py_out[vi], zw_out[vi], iw_out[vi])) {
-					// Force SH path if perspective divide fails.
 					codes_out[vi] = kNear;
 				}
 			}
 		}
 	}
 #endif
-	for (; i < vertex_count; ++i) {
+	for (; i < end; ++i) {
 		const float* p = positions + i * 3U;
 		ClipVert& c = clip_out[i];
 		c = MulViewProj(mvp, p[0], p[1], p[2]);
@@ -2048,6 +2053,65 @@ inline void TransformMeshPositions(
 			}
 		}
 	}
+}
+
+/**
+ * Transform mesh positions through column-major MVP; write clip + outcodes.
+ *
+ * When outcode == 0, also perspective-divides into px/py/zw/iw (project once per vert).
+ * Large meshes use OpenMP over 64-vert chunks (disjoint scratch writes); small meshes stay serial.
+ */
+inline void TransformMeshPositions(
+	const float* mvp,
+	const float* positions,
+	const std::size_t vertex_count,
+	ClipVert* clip_out,
+	int* codes_out,
+	float* px_out,
+	float* py_out,
+	float* zw_out,
+	float* iw_out,
+	const int width,
+	const int height) {
+#if defined(_OPENMP)
+	if (vertex_count >= kMinVertsForOmpTransform) {
+		InitOpenMpOnce();
+		const int num_chunks =
+			static_cast<int>((vertex_count + kTransformChunkVerts - 1U) / kTransformChunkVerts);
+		#pragma omp parallel for schedule(static)
+		for (int c = 0; c < num_chunks; ++c) {
+			const std::size_t begin = static_cast<std::size_t>(c) * kTransformChunkVerts;
+			const std::size_t end = std::min(begin + kTransformChunkVerts, vertex_count);
+			TransformMeshPositionsRange(
+				mvp,
+				positions,
+				begin,
+				end,
+				clip_out,
+				codes_out,
+				px_out,
+				py_out,
+				zw_out,
+				iw_out,
+				width,
+				height);
+		}
+		return;
+	}
+#endif
+	TransformMeshPositionsRange(
+		mvp,
+		positions,
+		0U,
+		vertex_count,
+		clip_out,
+		codes_out,
+		px_out,
+		py_out,
+		zw_out,
+		iw_out,
+		width,
+		height);
 }
 
 /**
