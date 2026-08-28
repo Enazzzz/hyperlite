@@ -7,7 +7,7 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 1. [Your first window](#4-your-first-window)
 2. [Best practices — read this](#10-best-practices--read-this)
 3. [Wireframe & FPS games](#7-wireframe--fps-games)
-4. Run `python/examples/minimal_game.py`, then `python/examples/wireframe_demo.py`
+4. Run `python/examples/minimal_game.py`, then `python/examples/native_game.py`
 
 ---
 
@@ -41,7 +41,7 @@ Hyperlite is an **immediate-mode 2D renderer** for Python on **Windows, Linux, a
 - Every frame, **you** queue draw operations (`clear`, `line`, `rect_fill`, `draw_sprite`, …).
 - The engine rasterizes in **painter’s order** and presents to a Win32, X11, or Cocoa window (or headless for CI).
 
-Think **pygame’s surface + blit model**, stripped to the metal: no scene graph, no font renderer, no audio mixer.
+Think **pygame’s surface + blit model**, stripped to the metal: the `Engine` has no scene graph. Optional C++ runtime (`Game`) adds a native loop, software mixer, bitmap text, and immediate UI — none of that is required to rasterize.
 
 ### Good for
 
@@ -62,7 +62,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 
 | Layer | You write | Hyperlite does |
 |-------|-----------|----------------|
-| Game logic | Python | — |
+| Game logic | Python and/or C++ `Game` systems | — |
 | Draw list | `line`, `draw_sprite`, `upload_frame_rgba`, … | Queues commands |
 | Raster | — | CPU SIMD / CUDA |
 | Present | — | Win32 GDI/DXGI, X11 (XShm), Cocoa (layer blit), or headless |
@@ -230,6 +230,16 @@ engine.tick()  # poll_events + end_frame + present
 ```
 
 Close with **X**, **Escape**, or `break` when `is_running()` is false.
+
+Native loop (C++ owns poll / clear / present; Python is optional):
+
+```python
+game = hyperlite.Game(800, 600, "cpu", "Hello Hyperlite")
+game.set_target_fps(60)
+game.run()  # no Python while-True required
+```
+
+Starter games: `python/examples/minimal_game.py` (Python loop) and `python/examples/native_game.py` (`Game.run()`). Platforms and install: [platforms.md](platforms.md). Native architecture: [game-runtime.md](game-runtime.md).
 
 ---
 
@@ -1245,7 +1255,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `mouse_delta()` | `(dx, dy)` since last `poll_events` (use while captured) |
 | `mouse_button_down(button)` | bool — use `hyperlite.MouseButtons.*` |
 
-Common keys: `Keys.Escape`, `Keys.W/A/S/D`, `Keys.F11`, `Keys.Return` (see `hyperlite.Keys` in Python).
+Common keys: `Keys.Escape`, `Keys.W/A/S/D`, `Keys.Left/Up/Right/Down`, `Keys.Space`, `Keys.Tab`, `Keys.F11`, `Keys.Return` (see `hyperlite.Keys` in Python).
 
 ### Window
 
@@ -1301,7 +1311,8 @@ raster_ms, present_ms = engine.wireframe_timings()
 
 | File | Demonstrates |
 |------|--------------|
-| `minimal_game.py` | **Start here** — WASD, vectors, CPU backend |
+| `minimal_game.py` | **Start here** — WASD Python loop, CPU backend |
+| `native_game.py` | **Native loop** — same mover via `Game.run()` |
 | `wireframe_demo.py` | **Wireframe FPS pattern** — NumPy segments + `tick_lines` |
 | `window_input_test.py` | Mouse lock, fullscreen, live resize |
 | `software_raster_demo.py` | NumPy + `upload_frame_rgba` + HUD |
@@ -1424,7 +1435,7 @@ Call `window_size()` each frame after `poll_events()`, or handle resize event on
 ## 17. Quick start checklist
 
 1. `.\scripts\install.ps1` or `python -m pip install . --force-reinstall --user`
-2. Run `python/examples/minimal_game.py` then `wireframe_demo.py`
+2. Run `python/examples/minimal_game.py`, then `native_game.py`, then `wireframe_demo.py`
 3. Pick backend from [§10 decision tree](#backend-decision-tree)
 4. **Wireframe game?** → `"cpu"` + preallocated NumPy + `tick_lines` + double-buffer
 5. **Sprite game?** → atlas + retained layers for static world, `tick_blits` or batched sprites

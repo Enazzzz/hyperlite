@@ -70,4 +70,6 @@ jobs:
           assert e.is_running()
           print("python_smoke=ok", hyperlite.__file__)
           PY
+          timeout 60 .venv/bin/python python/examples/native_game.py
+          timeout 60 .venv/bin/python python/examples/minimal_game.py
           timeout 60 .venv/bin/python python/examples/proc_world.py --preset smoke --headless --seconds 3

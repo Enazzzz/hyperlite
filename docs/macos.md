@@ -70,7 +70,7 @@ Windowed:
 - AppKit must run on the **main thread**. Drive `Engine` / `Game` from the thread that created the window (typical Python main).
 - Framebuffer size is engine pixels. A Retina display stretches the software framebuffer; raster resolution does not follow `backingScaleFactor`.
 - `NativeHandle()` is `NSWindow*`.
-- `AudioSystem.StartOutput()` is a no-op on Linux/Windows in this branch; Mix-to-buffer still works everywhere.
+- `AudioSystem.StartOutput()` is a no-op on Linux/Windows; Mix-to-buffer still works everywhere.
 - Portable `-DHYPERLITE_MARCH=x86-64` is ignored on Apple Silicon.
 
 ## Troubleshooting
