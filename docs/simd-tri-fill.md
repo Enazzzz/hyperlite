@@ -78,6 +78,7 @@ Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP
 | **Fixed-point / subpixel edge functions** | **Not shipped** (same rationale as AVX2 PR). |
 | **OpenMP over triangles** | Still **forbidden** (depth races). Tiles own pixels. |
 | **SIMD / streaming color + depth clear** | **Not shipped** — noise on cacheable SIMD; large loss with `MOVNT*` before immediate raster read. See [simd-clear.md](simd-clear.md). |
+| **ScreenTri by-value tile fill + compact layout** (post-#29) | **Not shipped** — `RasterScreenTriTile` took ~96B `ScreenTri` by value per tile visit; tried `const ScreenTri&` + `ScreenTriFillGeom` local winding view, geometry-first struct (flat skips UV/atlas reads), and flat fast emit without `iw` writes. Interleaved 8 pairs vs `a4b50bc` on this VM: headline benches **±0–8%** run-to-run (e.g. mesh flat **−15%…+8%**, textured **−8%…+6%**, immediate **~flat**); no stable win. **Do not retry** by-value copy or layout-only splits without profiler proof fill is memcpy-bound. Details: [mesh-transform.md](mesh-transform.md#screentri-compact-fill-post-29). |
 
 ## Reproduce
 

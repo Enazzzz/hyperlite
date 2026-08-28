@@ -99,6 +99,54 @@ Interleaved 8 pairs vs post-#28 `main` on this VM (Release headless, `HYPERLITE_
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
 | CSR two-pass bin counts | **Dropped** — reused `vector` bins were enough; extra pass not needed |
 
+## ScreenTri compact fill (post-#29) {#screentri-compact-fill-post-29}
+
+**Hypothesis:** fat `ScreenTri` (~18 floats + atlas pointer + dims, ~96B) copied by value into `RasterScreenTriTile` on every tile visit; flat emit skips UV writes but `emplace_back` still value-inits the whole struct.
+
+**Tried (in order):**
+
+1. **`const ScreenTri&` + `ScreenTriFillGeom`** — stop by-value copy; build CCW-corrected local geometry once per tile call (winding swap on locals only).
+2. **Compact layout** — geometry block first (`xy/zw` per vertex, then `color` + atlas tag); flat fast emit drops `iw` parameters; `BuildScreenTriFillGeom` skips reading `iw`/UV when `atlas_rgba == null`.
+3. **Cached signed area at emit** — not pursued; steps (1)+(2) did not show a stable win.
+
+Fill SIMD kernels and binning unchanged.
+
+### Paired benches (this VM, interleaved 8 pairs)
+
+Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP. Baseline: parent `main` at `a4b50bc` (post-#29).
+
+**Variant A — steps (1)+(2) combined** (three 8-pair runs; high variance):
+
+| Bench | Δ run 1 | Δ run 2 | Δ run 3 |
+|-------|---------|---------|---------|
+| `cpu_tri_bench` | **+0.7%** | **+2.5%** | **+4.2%** |
+| `cpu_tri_bench occluded` | **+6.4%** | **+3.7%** | **+8.4%** |
+| `cpu_tri_bench occluded-2draw` | **+19.7%** | **+13.7%** | **+6.6%** |
+| `cpu_mesh_bench flat` | **+0.5%** | **−15.1%** | **+8.6%** |
+| `cpu_mesh_bench textured` | **−8.3%** | **−3.4%** | **−1.7%** |
+| `cpu_mesh_bench occluded` | **−13.7%** | **+13.3%** | **−9.2%** |
+| `cpu_mesh_bench occluded-2draw` | **−17.0%** | **+8.7%** | **+14.0%** |
+
+**Variant B — step (1) only** (`const ScreenTri&` + `ScreenTriFillGeom`, original interleaved layout):
+
+| Bench | Δ |
+|-------|---|
+| `cpu_tri_bench` | **~flat (+0.1%)** |
+| `cpu_tri_bench occluded` | **+33.8%** (outlier / noise) |
+| `cpu_tri_bench occluded-2draw` | **−6.0%** |
+| `cpu_mesh_bench flat` | **+0.5%** |
+| `cpu_mesh_bench textured` | **+5.6%** |
+| `cpu_mesh_bench occluded` | **+0.7%** |
+| `cpu_mesh_bench occluded-2draw` | **−12.7%** |
+
+**Outcome: not shipped.** Swings exceed prior emit-noise band; time remains in bin + `RasterScreenTrisTiled` + fill inner loops, not struct memcpy. Engine reverted; **do not retry** unless profiling shows tile-fill parameter copies in hot samples.
+
+| Experiment | Result |
+|------------|--------|
+| `RasterScreenTriTile` `const ScreenTri&` + local fill geom | **Noise** — see tables above |
+| Geometry-first `ScreenTri` + flat emit without `iw` | **Noise** — no consistent mesh win |
+| Cached `area2` at emit | **Not tried** (no signal from 1–2) |
+
 ## Reproduce
 
 ```bash
