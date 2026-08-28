@@ -12,6 +12,12 @@
 #include "engine/win32_window.hpp"
 #endif
 
+#ifdef __APPLE__
+#if defined(HYPERLITE_HAS_COCOA) && HYPERLITE_HAS_COCOA
+#include "engine/macos_window.hpp"
+#endif
+#endif
+
 #if defined(HYPERLITE_HAS_X11) && HYPERLITE_HAS_X11
 #include "engine/x11_window.hpp"
 #endif
@@ -54,6 +60,10 @@ bool EnvRequestsWindow() {
 bool DisplayAvailable() {
 #ifdef _WIN32
 	return true;
+#elif defined(__APPLE__)
+	// Aqua is available on a logged-in Mac session, including GitHub-hosted
+	// macOS runners. HYPERLITE_HEADLESS is handled before this check.
+	return true;
 #else
 	const char* display = std::getenv("DISPLAY");
 	if (display != nullptr && display[0] != '\0') {
@@ -95,6 +105,13 @@ std::unique_ptr<IWindow> CreatePlatformWindow(
 
 #ifdef _WIN32
 	return std::make_unique<Win32Window>(width, height, std::move(title));
+#elif defined(HYPERLITE_HAS_COCOA) && HYPERLITE_HAS_COCOA
+	try {
+		return std::make_unique<MacosWindow>(width, height, std::move(title));
+	} catch (const std::exception& ex) {
+		std::cerr << "[hyperlite] Cocoa window failed (" << ex.what() << "); falling back to headless.\n";
+		return std::make_unique<HeadlessWindow>(width, height, "hyperlite-headless");
+	}
 #elif defined(HYPERLITE_HAS_X11) && HYPERLITE_HAS_X11
 	try {
 		return std::make_unique<X11Window>(width, height, std::move(title));
@@ -103,7 +120,7 @@ std::unique_ptr<IWindow> CreatePlatformWindow(
 		return std::make_unique<HeadlessWindow>(width, height, "hyperlite-headless");
 	}
 #else
-	std::cerr << "[hyperlite] Built without X11; using headless present.\n";
+	std::cerr << "[hyperlite] Built without a window backend; using headless present.\n";
 	return std::make_unique<HeadlessWindow>(width, height, std::move(title));
 #endif
 }

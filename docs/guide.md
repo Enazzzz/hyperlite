@@ -35,11 +35,11 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 
 ## 1. What Hyperlite is (and is not)
 
-Hyperlite is an **immediate-mode 2D renderer** for Python on **Windows and Linux**:
+Hyperlite is an **immediate-mode 2D renderer** for Python on **Windows, Linux, and macOS**:
 
 - You own the game logic in plain Python.
 - Every frame, **you** queue draw operations (`clear`, `line`, `rect_fill`, `draw_sprite`, …).
-- The engine rasterizes in **painter’s order** and presents to a Win32 or X11 window (or headless for CI).
+- The engine rasterizes in **painter’s order** and presents to a Win32, X11, or Cocoa window (or headless for CI).
 
 Think **pygame’s surface + blit model**, stripped to the metal: no scene graph, no font renderer, no audio mixer.
 
@@ -55,9 +55,8 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 ### Not good for (today)
 
 - Full 3D meshes with PBR / scene graph (depth-tested **wireframe**, **filled tris**, and **retained meshes** are Layers 0–2 — see [3d-plan.md](3d-plan.md) / [3d-meshes.md](3d-meshes.md))
-- macOS (Windows + Linux only for now)
 - “Drop in PNG and forget” without using `load_atlas` / `blit_rgba`
-- Built-in text rendering, physics, or networking
+- Built-in networking
 
 ### Mental model
 
@@ -66,7 +65,7 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 | Game logic | Python | — |
 | Draw list | `line`, `draw_sprite`, `upload_frame_rgba`, … | Queues commands |
 | Raster | — | CPU SIMD / CUDA |
-| Present | — | Win32 GDI/DXGI, X11 (XShm), or headless |
+| Present | — | Win32 GDI/DXGI, X11 (XShm), Cocoa (layer blit), or headless |
 
 ---
 
@@ -98,6 +97,19 @@ Think **pygame’s surface + blit model**, stripped to the metal: no scene graph
 sudo apt-get install -y build-essential g++ cmake python3-dev python3-venv \
   libx11-dev libxext-dev libomp-dev
 ```
+
+### macOS
+
+| Component | Required | Notes |
+|-----------|----------|-------|
+| macOS 11+ | Yes | Apple Silicon or Intel |
+| Xcode Command Line Tools | Yes | `xcode-select --install` |
+| CMake 3.24+ | Yes | Homebrew `cmake` |
+| Python 3.10+ | Yes | python.org or Homebrew; needed to build the `.so` |
+| Homebrew `libomp` | Optional | Apple Clang has no OpenMP by default |
+| CUDA Toolkit | No | `"gpu"` is not available; software raster only |
+
+Cocoa presents Hyperlite's host RGBA8 framebuffer (no Metal raster). Details: [macos.md](macos.md).
 
 ---
 
@@ -153,6 +165,21 @@ ctest --test-dir build --output-on-failure
 
 See [linux-bench.md](linux-bench.md) for measured baseline numbers.
 
+### macOS
+
+```bash
+xcode-select --install
+brew install cmake python   # if needed
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHYPERLITE_ENABLE_CUDA=OFF
+cmake --build build -j
+python3 -m venv .venv && .venv/bin/pip install .
+# or: bash scripts/install.sh
+HYPERLITE_HEADLESS=1 .venv/bin/python -c \
+  "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print('OK', e.backend_name())"
+```
+
+Windowed present uses Cocoa. See [macos.md](macos.md).
+
 ### Verify
 
 ```powershell
@@ -169,7 +196,7 @@ python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu'); print('OK', hyperl
 2. **Unset `PYTHONPATH`** when testing the installed package — otherwise you may load a stale build artifact.
 3. **GPU + DLL/so errors** — add CUDA to `PATH`/`LD_LIBRARY_PATH` or use `backend="cpu"`.
 4. **Reinstall after every engine rebuild** — `pip install . --force-reinstall`.
-5. **Headless default** — when `DISPLAY` is unset on Linux, present mode is headless automatically.
+5. **Headless default** — when `DISPLAY` is unset on Linux, present mode is headless automatically. On macOS, Aqua is assumed available; use `HYPERLITE_HEADLESS=1` in CI.
 
 Do **not** rely on `PYTHONPATH=build/` for daily use; that bypasses site-packages and causes version skew.
 
@@ -842,6 +869,7 @@ Start
 - Double-buffer and GPU direct **cannot** combine.
 - For wireframe FPS: double-buffer on CPU. For GPU sprite games on Windows: direct present.
 - On Linux, windowed present uses X11 + MIT-SHM when available; otherwise headless. DXGI/GDI APIs remain Windows-only no-ops/stubs on Linux.
+- On macOS, windowed present blits host RGBA8 into an AppKit layer (nearest-neighbor). CUDA/DXGI are unavailable. Raster stays CPU software; see [macos.md](macos.md).
 
 ### Python performance patterns
 
@@ -1119,7 +1147,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `poll_events()` | None | Pump OS events (Win32/X11); updates input; handles resize |
+| `poll_events()` | None | Pump OS events (Win32/X11/Cocoa); updates input; handles resize |
 | `begin_frame()` | None | Start command recording; reset `delta_time` anchor |
 | `end_frame()` | None | Execute command buffer |
 | `present()` | None | Show framebuffer (no-op when headless) |

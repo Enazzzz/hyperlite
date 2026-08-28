@@ -2,7 +2,7 @@
 
 Super lightweight immediate-mode renderer for Python — like pygame, but you draw every pixel (or line, or rect) yourself, and the engine stays out of your way.
 
-**Windows & Linux** · **CPU or CUDA GPU backend** · **Not on PyPI** (local install only)
+**Windows, Linux & macOS** · **CPU software raster** (CUDA GPU backend on Windows/Linux) · **Not on PyPI** (local install only)
 
 ## Quick start
 
@@ -33,7 +33,24 @@ HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(6
 
 Or: `bash scripts/install.sh`
 
+### macOS
+
+**Requirements:** Xcode Command Line Tools, CMake 3.24+, Python 3.10+. Optional: Homebrew `libomp` for OpenMP. CUDA is not used.
+
+```bash
+xcode-select --install   # once
+brew install cmake python   # if needed
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHYPERLITE_ENABLE_CUDA=OFF && cmake --build build -j
+python3 -m venv .venv && .venv/bin/pip install .
+HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(64,64,'cpu',present='headless'); print(e.backend_name())"
+.venv/bin/python python/examples/minimal_game.py
+```
+
+Or: `bash scripts/install.sh`
+
 **Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
+**macOS notes:** [docs/macos.md](docs/macos.md) — Cocoa present, GameController, Core Audio.  
 **Native game runtime (optional):** [docs/game-runtime.md](docs/game-runtime.md) — `Game.run()`, jobs, input, world, physics, audio, UI.  
 **Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)  
 **3D wireframe (Layer 0) + filled tris (Layer 1):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md) · [docs/3d-tri-bench.md](docs/3d-tri-bench.md)  
@@ -63,7 +80,7 @@ No scene graph, no sprites, no UI toolkit — just a fast framebuffer, draw comm
 |------|-----|------|
 | `auto` (default) | Window if a display exists, else headless | Interactive apps |
 | `headless` | No window; `present()` is a no-op | CI, benches, servers |
-| `window` | Win32 (Windows) or X11 (Linux) | Force a window |
+| `window` | Win32 (Windows), X11 (Linux), or Cocoa (macOS) | Force a window |
 
 Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRESENT=headless|window`.
 
@@ -71,7 +88,7 @@ Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRE
 
 | Path | Purpose |
 |------|---------|
-| `engine/` | C++ core (Win32/X11/headless, CPU/GPU rasterizers) |
+| `engine/` | C++ core (Win32/X11/Cocoa/headless, CPU/GPU rasterizers) |
 | `bindings/python/` | Python C extension |
 | `python/examples/` | Demos and benchmarks |
 | `docs/guide.md` | **How-to guide** |

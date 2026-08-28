@@ -62,6 +62,7 @@ void Game::SetTargetFps(const double fps) {
 
 void Game::Shutdown() {
 	quit_ = true;
+	audio_.StopOutput();
 	jobs_.Shutdown();
 	jobs_started_ = false;
 }
@@ -140,12 +141,14 @@ void Game::Step() {
 
 void Game::Run() {
 	quit_ = false;
+	audio_.StartOutput();
 	while (engine_.IsRunning() && !quit_) {
 		if (max_frames_ > 0 && static_cast<int>(frame_index_) >= max_frames_) {
 			break;
 		}
 		Step();
 	}
+	audio_.StopOutput();
 }
 
 void Game::DrawMeshInstances(

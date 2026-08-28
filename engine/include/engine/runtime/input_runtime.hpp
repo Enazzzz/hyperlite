@@ -73,7 +73,8 @@ public:
 	const GamepadState& Gamepad(const int index) const;
 
 	/**
-	 * Poll Linux /dev/input/js* when present. No-op on other platforms or when absent.
+	 * Poll Linux /dev/input/js* or macOS GameController.framework.
+	 * No-op on other platforms or when no pad is attached.
 	 */
 	void PollGamepads();
 

@@ -2303,6 +2303,20 @@ static PyObject* PyGame_request_quit(PyGameObject* self, PyObject* args) {
 	Py_RETURN_NONE;
 }
 
+static PyObject* PyGame_start_audio_output(PyGameObject* self, PyObject* args) {
+	(void)args;
+	if (self->native_game->StartAudioOutput()) {
+		Py_RETURN_TRUE;
+	}
+	Py_RETURN_FALSE;
+}
+
+static PyObject* PyGame_stop_audio_output(PyGameObject* self, PyObject* args) {
+	(void)args;
+	self->native_game->StopAudioOutput();
+	Py_RETURN_NONE;
+}
+
 static PyObject* PyGame_set_target_fps(PyGameObject* self, PyObject* args) {
 	double fps = 0.0;
 	if (!PyArg_ParseTuple(args, "d", &fps)) {
@@ -2488,6 +2502,8 @@ static PyMethodDef PyGame_methods[] = {
 	{"run", reinterpret_cast<PyCFunction>(PyGame_run), METH_NOARGS, "Native main loop (no Python while-True required)."},
 	{"step", reinterpret_cast<PyCFunction>(PyGame_step), METH_NOARGS, "One native frame."},
 	{"request_quit", reinterpret_cast<PyCFunction>(PyGame_request_quit), METH_NOARGS, "Request the native loop to exit."},
+	{"start_audio_output", reinterpret_cast<PyCFunction>(PyGame_start_audio_output), METH_NOARGS, "Open platform audio output (Core Audio on macOS; no-op elsewhere)."},
+	{"stop_audio_output", reinterpret_cast<PyCFunction>(PyGame_stop_audio_output), METH_NOARGS, "Stop platform audio output. Mix() remains available."},
 	{"set_target_fps", reinterpret_cast<PyCFunction>(PyGame_set_target_fps), METH_VARARGS, "Frame pacing (0 = uncapped)."},
 	{"set_max_frames", reinterpret_cast<PyCFunction>(PyGame_set_max_frames), METH_VARARGS, "Stop after N frames (tests / headless)."},
 	{"delta_time", reinterpret_cast<PyCFunction>(PyGame_delta_time), METH_NOARGS, "Seconds since previous native step."},
