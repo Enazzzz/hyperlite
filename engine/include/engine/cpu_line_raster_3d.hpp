@@ -272,10 +272,11 @@ inline void PlotDepthPixel(
  * Depth-tested horizontal span [x0, x1] inclusive at fixed y (window-space z lerped).
  *
  * Opaque + depth uses AVX2 8-wide compare/store when available; depth-null uses FillSpan.
+ * Depth segments stop at 128×128 panel boundaries (panel-major layout).
  */
 inline void DrawHorizontalSpanDepth(
 	std::uint32_t* dst,
-	float* depth_row_base,
+	DepthBuffer* depth,
 	const int width,
 	const int x0,
 	const int x1,
@@ -294,68 +295,80 @@ inline void DrawHorizontalSpanDepth(
 		std::swap(xa, xb);
 		std::swap(za, zb);
 	}
-	const int count = xb - xa + 1;
-	std::uint32_t* color_row = dst + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(xa);
 	bounds.Expand(xa, y);
 	bounds.Expand(xb, y);
 
-	if (depth_row_base == nullptr) {
-		FillSpan(color_row, static_cast<std::size_t>(count), packed_color);
-		return;
-	}
+	const int total = xb - xa + 1;
+	const float dz = total > 1 ? (zb - za) / static_cast<float>(total - 1) : 0.0f;
+	constexpr int kPanel = DepthBuffer::kPanelSize;
 
-	float* depth_row = depth_row_base + static_cast<std::size_t>(xa);
-	const float dz = count > 1 ? (zb - za) / static_cast<float>(count - 1) : 0.0f;
+	int seg_x = xa;
+	float z = za;
+	while (seg_x <= xb) {
+		const int tile_x = seg_x / kPanel;
+		const int seg_end = std::min(xb, (tile_x + 1) * kPanel - 1);
+		const int count = seg_end - seg_x + 1;
+		std::uint32_t* color_row = dst + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) +
+			static_cast<std::size_t>(seg_x);
 
-	if (opaque) {
-		int i = 0;
+		if (depth == nullptr || !depth->Allocated()) {
+			FillSpan(color_row, static_cast<std::size_t>(count), packed_color);
+		} else if (opaque) {
+			float* depth_row = depth->Ptr(seg_x, y);
+			int i = 0;
 #if defined(__AVX2__)
-		__m256 z_vec = _mm256_setr_ps(
-			za,
-			za + dz,
-			za + 2.0f * dz,
-			za + 3.0f * dz,
-			za + 4.0f * dz,
-			za + 5.0f * dz,
-			za + 6.0f * dz,
-			za + 7.0f * dz);
-		const __m256 dz8 = _mm256_set1_ps(8.0f * dz);
-		const __m256i color_vec = _mm256_set1_epi32(static_cast<int>(packed_color));
-		for (; i + 8 <= count; i += 8) {
-			float* dptr = depth_row + i;
-			std::uint32_t* cptr = color_row + i;
-			const __m256 old_z = _mm256_loadu_ps(dptr);
-			const __m256 pass = _mm256_cmp_ps(z_vec, old_z, _CMP_LE_OQ);
-			const __m256 new_z = _mm256_blendv_ps(old_z, z_vec, pass);
-			_mm256_storeu_ps(dptr, new_z);
-			_mm256_maskstore_epi32(reinterpret_cast<int*>(cptr), _mm256_castps_si256(pass), color_vec);
-			z_vec = _mm256_add_ps(z_vec, dz8);
-		}
-		float z = za + static_cast<float>(i) * dz;
+			__m256 z_vec = _mm256_setr_ps(
+				z,
+				z + dz,
+				z + 2.0f * dz,
+				z + 3.0f * dz,
+				z + 4.0f * dz,
+				z + 5.0f * dz,
+				z + 6.0f * dz,
+				z + 7.0f * dz);
+			const __m256 dz8 = _mm256_set1_ps(8.0f * dz);
+			const __m256i color_vec = _mm256_set1_epi32(static_cast<int>(packed_color));
+			for (; i + 8 <= count; i += 8) {
+				float* dptr = depth_row + i;
+				std::uint32_t* cptr = color_row + i;
+				const __m256 old_z = _mm256_loadu_ps(dptr);
+				const __m256 pass = _mm256_cmp_ps(z_vec, old_z, _CMP_LE_OQ);
+				const __m256 new_z = _mm256_blendv_ps(old_z, z_vec, pass);
+				_mm256_storeu_ps(dptr, new_z);
+				_mm256_maskstore_epi32(reinterpret_cast<int*>(cptr), _mm256_castps_si256(pass), color_vec);
+				z_vec = _mm256_add_ps(z_vec, dz8);
+			}
+			float z_scalar = z + static_cast<float>(i) * dz;
 #else
-		float z = za;
+			float z_scalar = z;
 #endif
-		for (; i < count; ++i, z += dz) {
-			if (z <= depth_row[i]) {
-				depth_row[i] = z;
-				color_row[i] = packed_color;
+			for (; i < count; ++i, z_scalar += dz) {
+				if (z_scalar <= depth_row[i]) {
+					depth_row[i] = z_scalar;
+					color_row[i] = packed_color;
+				}
+			}
+		} else {
+			float z_scalar = z;
+			for (int i = 0; i < count; ++i, z_scalar += dz) {
+				float* depth_ptr = depth->Ptr(seg_x + i, y);
+				PlotDepthPixel(color_row + i, depth_ptr, z_scalar, packed_color, sa, false);
 			}
 		}
-		return;
-	}
 
-	float z = za;
-	for (int i = 0; i < count; ++i, z += dz) {
-		PlotDepthPixel(color_row + i, depth_row + i, z, packed_color, sa, false);
+		seg_x = seg_end + 1;
+		z += dz * static_cast<float>(count);
 	}
 }
 
 /**
  * Depth-tested vertical span [y0, y1] inclusive at fixed x (window-space z lerped).
+ *
+ * Walks panel rows with stride kPanelSize while y stays inside one 128×128 panel.
  */
 inline void DrawVerticalSpanDepth(
 	std::uint32_t* dst,
-	float* depth_base,
+	DepthBuffer* depth,
 	const int width,
 	const int x,
 	const int y0,
@@ -374,20 +387,34 @@ inline void DrawVerticalSpanDepth(
 		std::swap(ya, yb);
 		std::swap(za, zb);
 	}
-	const int count = yb - ya + 1;
-	const std::size_t stride = static_cast<std::size_t>(width);
-	std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(ya) * stride) + static_cast<std::size_t>(x);
-	float* depth_ptr = depth_base != nullptr ? depth_base + (static_cast<std::size_t>(ya) * stride) + static_cast<std::size_t>(x) : nullptr;
 	bounds.Expand(x, ya);
 	bounds.Expand(x, yb);
-	const float dz = count > 1 ? (zb - za) / static_cast<float>(count - 1) : 0.0f;
+
+	const int total = yb - ya + 1;
+	const float dz = total > 1 ? (zb - za) / static_cast<float>(total - 1) : 0.0f;
+	const std::size_t color_stride = static_cast<std::size_t>(width);
+	constexpr int kPanel = DepthBuffer::kPanelSize;
+	const bool has_depth = depth != nullptr && depth->Allocated();
+
+	int seg_y = ya;
 	float z = za;
-	for (int i = 0; i < count; ++i, z += dz) {
-		PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
-		color_ptr += stride;
-		if (depth_ptr != nullptr) {
-			depth_ptr += stride;
+	while (seg_y <= yb) {
+		const int tile_y = seg_y / kPanel;
+		const int seg_end = std::min(yb, (tile_y + 1) * kPanel - 1);
+		const int count = seg_end - seg_y + 1;
+		std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(seg_y) * color_stride) +
+			static_cast<std::size_t>(x);
+		float* depth_ptr = has_depth ? depth->Ptr(x, seg_y) : nullptr;
+		float z_seg = z;
+		for (int i = 0; i < count; ++i, z_seg += dz) {
+			PlotDepthPixel(color_ptr, depth_ptr, z_seg, packed_color, sa, opaque);
+			color_ptr += color_stride;
+			if (depth_ptr != nullptr) {
+				depth_ptr += kPanel;
+			}
 		}
+		seg_y = seg_end + 1;
+		z += dz * static_cast<float>(count);
 	}
 }
 
@@ -464,15 +491,14 @@ inline void DrawThinLineDepth(
 	const float z1_win = NdcToWindowDepth(depth1);
 	const std::uint32_t sa = packed_color >> 24U;
 	const bool opaque = sa == 255U;
-	float* depth_base = (depth != nullptr && depth->Allocated()) ? depth->Data() : nullptr;
+	const bool has_depth = depth != nullptr && depth->Allocated();
 
 	if (y0 == y1) {
-		float* depth_row = depth_base != nullptr ? depth_base + static_cast<std::size_t>(y0) * static_cast<std::size_t>(width) : nullptr;
-		DrawHorizontalSpanDepth(dst, depth_row, width, x0, x1, y0, z0_win, z1_win, packed_color, sa, opaque, bounds);
+		DrawHorizontalSpanDepth(dst, depth, width, x0, x1, y0, z0_win, z1_win, packed_color, sa, opaque, bounds);
 		return;
 	}
 	if (x0 == x1) {
-		DrawVerticalSpanDepth(dst, depth_base, width, x0, y0, y1, z0_win, z1_win, packed_color, sa, opaque, bounds);
+		DrawVerticalSpanDepth(dst, depth, width, x0, y0, y1, z0_win, z1_win, packed_color, sa, opaque, bounds);
 		return;
 	}
 
@@ -487,25 +513,27 @@ inline void DrawThinLineDepth(
 	const int steps = std::max(adx, ady);
 	const float dz = steps > 0 ? (z1_win - z0_win) / static_cast<float>(steps) : 0.0f;
 
-	std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(y0) * stride) + static_cast<std::size_t>(x0);
-	float* depth_ptr = depth_base != nullptr ? depth_base + (static_cast<std::size_t>(y0) * stride) + static_cast<std::size_t>(x0) : nullptr;
+	int cx = x0;
+	int cy = y0;
+	std::uint32_t* color_ptr = dst + (static_cast<std::size_t>(cy) * stride) + static_cast<std::size_t>(cx);
 	float z = z0_win;
 
-	// Opaque + depth: tight loop (no alpha / null-depth branches). Common wireframe path.
-	if (opaque && depth_ptr != nullptr) {
+	// Opaque + depth: coordinate-tracked Bresenham (panel-major depth has non-linear stride).
+	if (opaque && has_depth) {
 		if (adx >= ady) {
 			int err = adx / 2;
 			for (int step = 0; step < steps; ++step) {
+				float* depth_ptr = depth->Ptr(cx, cy);
 				if (z <= *depth_ptr) {
 					*depth_ptr = z;
 					*color_ptr = packed_color;
 				}
 				err -= ady;
+				cx += sx;
 				color_ptr += sx;
-				depth_ptr += sx;
 				if (err < 0) {
+					cy += sy;
 					color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-					depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
 					err += adx;
 				}
 				z += dz;
@@ -513,22 +541,23 @@ inline void DrawThinLineDepth(
 		} else {
 			int err = ady / 2;
 			for (int step = 0; step < steps; ++step) {
+				float* depth_ptr = depth->Ptr(cx, cy);
 				if (z <= *depth_ptr) {
 					*depth_ptr = z;
 					*color_ptr = packed_color;
 				}
 				err -= adx;
+				cy += sy;
 				color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-				depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
 				if (err < 0) {
+					cx += sx;
 					color_ptr += sx;
-					depth_ptr += sx;
 					err += ady;
 				}
 				z += dz;
 			}
 		}
-		float* end_d = depth_base + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1);
+		float* end_d = depth->Ptr(x1, y1);
 		if (z1_win <= *end_d) {
 			*end_d = z1_win;
 			dst[(static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1)] = packed_color;
@@ -539,17 +568,14 @@ inline void DrawThinLineDepth(
 	if (adx >= ady) {
 		int err = adx / 2;
 		for (int step = 0; step < steps; ++step) {
+			float* depth_ptr = has_depth ? depth->Ptr(cx, cy) : nullptr;
 			PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
 			err -= ady;
+			cx += sx;
 			color_ptr += sx;
-			if (depth_ptr != nullptr) {
-				depth_ptr += sx;
-			}
 			if (err < 0) {
+				cy += sy;
 				color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-				if (depth_ptr != nullptr) {
-					depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-				}
 				err += adx;
 			}
 			z += dz;
@@ -557,17 +583,14 @@ inline void DrawThinLineDepth(
 	} else {
 		int err = ady / 2;
 		for (int step = 0; step < steps; ++step) {
+			float* depth_ptr = has_depth ? depth->Ptr(cx, cy) : nullptr;
 			PlotDepthPixel(color_ptr, depth_ptr, z, packed_color, sa, opaque);
 			err -= adx;
+			cy += sy;
 			color_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-			if (depth_ptr != nullptr) {
-				depth_ptr += static_cast<std::ptrdiff_t>(sy) * static_cast<std::ptrdiff_t>(stride);
-			}
 			if (err < 0) {
+				cx += sx;
 				color_ptr += sx;
-				if (depth_ptr != nullptr) {
-					depth_ptr += sx;
-				}
 				err += ady;
 			}
 			z += dz;
@@ -576,7 +599,7 @@ inline void DrawThinLineDepth(
 
 	PlotDepthPixel(
 		dst + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1),
-		depth_base != nullptr ? depth_base + (static_cast<std::size_t>(y1) * stride) + static_cast<std::size_t>(x1) : nullptr,
+		has_depth ? depth->Ptr(x1, y1) : nullptr,
 		z1_win,
 		packed_color,
 		sa,

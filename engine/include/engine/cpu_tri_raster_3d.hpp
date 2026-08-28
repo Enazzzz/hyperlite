@@ -381,27 +381,37 @@ inline float TriMinWindowDepthVertices(ScreenTri tri) {
  *
  * Retained for tests / fallback; the tiled raster tracks max depth on write instead of
  * rescanning the tile after every triangle (see RasterScreenTrisTiled).
+ *
+ * Region must lie within one 128×128 panel (matches tri bin tiles).
  */
 inline float ScanTileMaxDepth(
-	const float* depth_base,
-	const int width,
+	const DepthBuffer& depth,
 	const int x0,
 	const int y0,
 	const int x1,
 	const int y1) {
+	const int kPanel = DepthBuffer::kPanelSize;
+	const int tile_x = x0 / kPanel;
+	const int tile_y = y0 / kPanel;
+	const float* panel = depth.PanelBase(tile_x, tile_y);
+	const int local_x0 = x0 - tile_x * kPanel;
+	const int local_y0 = y0 - tile_y * kPanel;
+	const int local_x1 = x1 - tile_x * kPanel;
+	const int local_y1 = y1 - tile_y * kPanel;
 	float max_d = 0.0f;
 #if defined(__AVX2__)
 	const __m256 vzero = _mm256_setzero_ps();
 	__m256 vmax = vzero;
-	for (int y = y0; y < y1; ++y) {
-		const float* row = depth_base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-		int x = x0;
-		for (; x + 8 <= x1; x += 8) {
-			const __m256 v = _mm256_loadu_ps(row + x);
+	for (int ly = local_y0; ly < local_y1; ++ly) {
+		const float* row = panel + static_cast<std::size_t>(ly) * static_cast<std::size_t>(kPanel) +
+			static_cast<std::size_t>(local_x0);
+		int x = local_x0;
+		for (; x + 8 <= local_x1; x += 8) {
+			const __m256 v = _mm256_loadu_ps(row + (x - local_x0));
 			vmax = _mm256_max_ps(vmax, v);
 		}
-		for (; x < x1; ++x) {
-			max_d = std::max(max_d, row[x]);
+		for (; x < local_x1; ++x) {
+			max_d = std::max(max_d, row[x - local_x0]);
 		}
 	}
 	alignas(32) float tmp[8];
@@ -410,10 +420,11 @@ inline float ScanTileMaxDepth(
 		max_d = std::max(max_d, tmp[i]);
 	}
 #else
-	for (int y = y0; y < y1; ++y) {
-		const float* row = depth_base + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-		for (int x = x0; x < x1; ++x) {
-			max_d = std::max(max_d, row[x]);
+	for (int ly = local_y0; ly < local_y1; ++ly) {
+		const float* row = panel + static_cast<std::size_t>(ly) * static_cast<std::size_t>(kPanel) +
+			static_cast<std::size_t>(local_x0);
+		for (int lx = local_x0; lx < local_x1; ++lx) {
+			max_d = std::max(max_d, row[lx - local_x0]);
 		}
 	}
 #endif
@@ -1019,10 +1030,10 @@ inline void ProcessTexturedPassedLanes(
 						dirty_y1 = std::max(dirty_y1, y);
 					} else {
 						if (has_depth && old_depth != nullptr) {
-							row_depth[x] = old_depth[lane];
+							row_depth[lane] = old_depth[lane];
 						}
 						bool pass = true;
-						if (has_depth && lz > row_depth[x]) {
+						if (has_depth && lz > row_depth[lane]) {
 							pass = false;
 						}
 						if (pass) {
@@ -1035,10 +1046,10 @@ inline void ProcessTexturedPassedLanes(
 						}
 					}
 				} else if (has_depth && old_depth != nullptr) {
-					row_depth[x] = old_depth[lane];
+					row_depth[lane] = old_depth[lane];
 				}
 			} else if (has_depth && old_depth != nullptr) {
-				row_depth[x] = old_depth[lane];
+				row_depth[lane] = old_depth[lane];
 			}
 		}
 		liw += diw_dx;
@@ -1168,7 +1179,11 @@ inline bool RasterScreenTriTile(
 	const std::uint32_t flat_a = flat_packed >> 24U;
 	const bool opaque_flat = !textured && flat_a == 255U;
 	const bool has_depth = depth != nullptr && depth->Allocated();
-	float* depth_base = has_depth ? depth->Data() : nullptr;
+	const int kPanel = DepthBuffer::kPanelSize;
+	const int depth_tile_x = tile_x0 / kPanel;
+	const int depth_tile_y = tile_y0 / kPanel;
+	float* depth_panel = has_depth ? depth->PanelBase(depth_tile_x, depth_tile_y) : nullptr;
+	const std::size_t depth_panel_stride = static_cast<std::size_t>(kPanel);
 	const std::size_t stride = static_cast<std::size_t>(width);
 	constexpr float kHiZFarDepth = 1.0f - 1e-6f;
 	const bool tile_depth_reject =
@@ -1250,7 +1265,11 @@ inline bool RasterScreenTriTile(
 			float w2 = w2_row;
 			float z_win = z_win_row;
 			std::uint32_t* row_dst = dst + static_cast<std::size_t>(y) * stride;
-			float* row_depth = has_depth ? (depth_base + static_cast<std::size_t>(y) * stride) : nullptr;
+			float* row_depth = has_depth
+				? (depth_panel + static_cast<std::size_t>(y - tile_y0) * depth_panel_stride +
+					static_cast<std::size_t>(ix0 - tile_x0))
+				: nullptr;
+			const int row_depth_x0 = ix0;
 
 			int x = ix0;
 #if defined(__AVX2__) || defined(__SSE4_2__)
@@ -1266,12 +1285,12 @@ inline bool RasterScreenTriTile(
 					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
 					int written = 0xFF;
 					if (has_depth) {
-						const __m256 d = _mm256_loadu_ps(row_depth + x);
+						const __m256 d = _mm256_loadu_ps(row_depth + (x - row_depth_x0));
 						const __m256 pass = _mm256_cmp_ps(zv, d, _CMP_LE_OQ);
 						const __m256i store_mask = _mm256_castps_si256(pass);
 						written = _mm256_movemask_ps(pass);
 						if (written != 0) {
-							_mm256_maskstore_ps(row_depth + x, store_mask, zv);
+							_mm256_maskstore_ps(row_depth + (x - row_depth_x0), store_mask, zv);
 							_mm256_maskstore_epi32(reinterpret_cast<int*>(row_dst + x), store_mask, color_i);
 							AccumulateMaskedDepthMax8(write_max, zv, written);
 						}
@@ -1282,7 +1301,7 @@ inline bool RasterScreenTriTile(
 					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
 					int written = 0xF;
 					if (has_depth) {
-						const __m128 d = _mm_loadu_ps(row_depth + x);
+						const __m128 d = _mm_loadu_ps(row_depth + (x - row_depth_x0));
 						const __m128 pass = _mm_cmple_ps(zv, d);
 						written = _mm_movemask_ps(pass);
 						if (written != 0) {
@@ -1296,7 +1315,7 @@ inline bool RasterScreenTriTile(
 									row_dst[x + i] = flat_packed;
 								}
 							}
-							_mm_storeu_ps(row_depth + x, _mm_load_ps(d_tmp));
+							_mm_storeu_ps(row_depth + (x - row_depth_x0), _mm_load_ps(d_tmp));
 							AccumulateMaskedDepthMax4(write_max, zv, written);
 						}
 					} else {
@@ -1324,7 +1343,7 @@ inline bool RasterScreenTriTile(
 #if defined(__AVX512F__) && defined(__AVX512VL__)
 					const int written = FillOpaqueFlatBlock8Vl(
 						row_dst + x,
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1337,7 +1356,7 @@ inline bool RasterScreenTriTile(
 #else
 					const int written = FillOpaqueFlatBlock8(
 						row_dst + x,
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1358,7 +1377,7 @@ inline bool RasterScreenTriTile(
 					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
 					const int written = FillOpaqueFlatBlock4(
 						row_dst + x,
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1387,7 +1406,7 @@ inline bool RasterScreenTriTile(
 				if (cover) {
 					if (has_depth) {
 						if (!(tile_depth_reject && z_win > tile_occluder_max)) {
-							float& slot = row_depth[x];
+							float& slot = row_depth[x - row_depth_x0];
 							if (z_win <= slot) {
 								slot = z_win;
 								row_dst[x] = flat_packed;
@@ -1486,7 +1505,11 @@ inline bool RasterScreenTriTile(
 			float uw = uw_row;
 			float vw = vw_row;
 			std::uint32_t* row_dst = dst + static_cast<std::size_t>(y) * stride;
-			float* row_depth = has_depth ? (depth_base + static_cast<std::size_t>(y) * stride) : nullptr;
+			float* row_depth = has_depth
+				? (depth_panel + static_cast<std::size_t>(y - tile_y0) * depth_panel_stride +
+					static_cast<std::size_t>(ix0 - tile_x0))
+				: nullptr;
+			const int row_depth_x0 = ix0;
 
 			int x = ix0;
 #if defined(__AVX2__) || defined(__SSE4_2__)
@@ -1504,7 +1527,7 @@ inline bool RasterScreenTriTile(
 					alignas(32) float old_depth[8];
 					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
 					const int passed = FillInteriorDepthBlock8(
-						has_depth ? (row_depth + x) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
 					if (passed != 0) {
 						ProcessTexturedPassedLanes(
 							row_dst,
@@ -1535,7 +1558,7 @@ inline bool RasterScreenTriTile(
 					alignas(16) float old_depth[4];
 					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
 					const int passed = FillInteriorDepthBlock4(
-						has_depth ? (row_depth + x) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr, zv, has_depth, has_depth ? old_depth : nullptr);
 					if (passed != 0) {
 						ProcessTexturedPassedLanes(
 							row_dst,
@@ -1589,7 +1612,7 @@ inline bool RasterScreenTriTile(
 					const __m256 zv = _mm256_add_ps(_mm256_set1_ps(z_win), dz_lane);
 #if defined(__AVX512F__) && defined(__AVX512VL__)
 					const int passed = FillOpaqueDepthBlock8Vl(
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1601,7 +1624,7 @@ inline bool RasterScreenTriTile(
 						has_depth ? old_depth : nullptr);
 #else
 					const int passed = FillOpaqueDepthBlock8(
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1645,7 +1668,7 @@ inline bool RasterScreenTriTile(
 					const __m128 w2v = _mm_add_ps(_mm_set1_ps(w2), a2_lane);
 					const __m128 zv = _mm_add_ps(_mm_set1_ps(z_win), dz_lane);
 					const int passed = FillOpaqueDepthBlock4(
-						has_depth ? (row_depth + x) : nullptr,
+						has_depth ? (row_depth + (x - row_depth_x0)) : nullptr,
 						w0v,
 						w1v,
 						w2v,
@@ -1707,14 +1730,14 @@ inline bool RasterScreenTriTile(
 							if (tile_depth_reject && z_win > tile_occluder_max) {
 								pass = false;
 							} else if (opaque) {
-								float& slot = row_depth[x];
+								float& slot = row_depth[x - row_depth_x0];
 								if (z_win <= slot) {
 									slot = z_win;
 									AccumulateDepthWriteMax(write_max, z_win);
 								} else {
 									pass = false;
 								}
-							} else if (z_win > row_depth[x]) {
+							} else if (z_win > row_depth[x - row_depth_x0]) {
 								pass = false;
 							}
 						}
@@ -2940,7 +2963,6 @@ inline void RasterScreenTrisTiled(
 #endif
 
 	if (hiz_defer == HiZDeferMode::CoplanarRebuild && depth_on) {
-		const float* depth_base = depth->Data();
 		for (int tile = 0; tile < tile_count; ++tile) {
 			if (tile_hiz_dirty[static_cast<std::size_t>(tile)] == 0) {
 				continue;
@@ -2952,7 +2974,7 @@ inline void RasterScreenTrisTiled(
 			const int hx1 = std::min(hx0 + kTile, width);
 			const int hy1 = std::min(hy0 + kTile, height);
 			tile_max_depth[static_cast<std::size_t>(tile)] =
-				ScanTileMaxDepth(depth_base, width, hx0, hy0, hx1, hy1);
+				ScanTileMaxDepth(*depth, hx0, hy0, hx1, hy1);
 		}
 	}
 
