@@ -67,6 +67,32 @@ set(HYPERLITE_ENGINE_SOURCES
 	engine/src/backend/backend_selector.cpp
 	engine/src/backend/cuda_backend.cpp
 	engine/src/raster/rasterizer.cpp
+	engine/src/runtime/job_system.cpp
+	engine/src/runtime/events.cpp
+	engine/src/runtime/input_runtime.cpp
+	engine/src/runtime/transform.cpp
+	engine/src/runtime/camera.cpp
+	engine/src/runtime/world.cpp
+	engine/src/runtime/resources.cpp
+	engine/src/runtime/culling.cpp
+	engine/src/runtime/lighting.cpp
+	engine/src/runtime/particles.cpp
+	engine/src/runtime/animation.cpp
+	engine/src/runtime/collision.cpp
+	engine/src/runtime/physics.cpp
+	engine/src/runtime/spatial.cpp
+	engine/src/runtime/streaming.cpp
+	engine/src/runtime/nav.cpp
+	engine/src/runtime/ai.cpp
+	engine/src/runtime/audio.cpp
+	engine/src/runtime/text.cpp
+	engine/src/runtime/ui.cpp
+	engine/src/runtime/save.cpp
+	engine/src/runtime/assets.cpp
+	engine/src/runtime/profiler.cpp
+	engine/src/runtime/debug_draw.cpp
+	engine/src/runtime/shader.cpp
+	engine/src/runtime/game.cpp
 )
 
 if(WIN32)
@@ -222,4 +248,9 @@ if(HYPERLITE_BUILD_TESTS)
 	target_link_libraries(mesh_textured_tests PRIVATE hyperlite_engine)
 	set_property(TARGET mesh_textured_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 	add_test(NAME mesh_textured_tests COMMAND mesh_textured_tests)
+
+	add_executable(game_runtime_tests tests/game_runtime_tests.cpp)
+	target_link_libraries(game_runtime_tests PRIVATE hyperlite_engine)
+	set_property(TARGET game_runtime_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	add_test(NAME game_runtime_tests COMMAND game_runtime_tests)
 endif()
