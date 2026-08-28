@@ -15,6 +15,8 @@ Inside `RasterScreenTriTile` (shared by immediate tris, flat mesh, textured mesh
 6. **Dirty-mask bitscan** — `ExpandDirtyFromMask` walks set bits with `std::countr_zero` (helps sparse edge blocks on the immediate path; portable vs MSVC).
 7. **Textured path** — same reject/accept + incremental perspective UV; **hybrid opaque fill** (shipped): AVX2/AVX-512VL 8-wide (SSE4.2 4-wide) coverage + depth test/write blocks identical to opaque flat, then **scalar** nearest-clamp atlas sample + color store only for depth-passed lanes. Translucent texels revert speculative depth writes in the scalar tail. Gather-based UV SIMD remains **not shipped** (see failed experiments).
 
+**Not shipped:** per-tile thread-local color+depth scratch + write-back (~**−17–36%** on paired benches; see [tile-local-scratch.md](tile-local-scratch.md)).
+
 Public Python/C++ API unchanged. Top-left, less-equal depth, opaque depth-write / translucent test-only, nearest clamp UV preserved. `ctest` green including `HYPERLITE_MARCH=x86-64` (no AVX2/AVX-512 required).
 
 ## Paired benches (this VM, same flags)
