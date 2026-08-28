@@ -9,12 +9,14 @@
 #include <vector>
 
 #include "engine/engine.hpp"
+#include "engine/runtime/game.hpp"
 #include "engine/sprite_draw.hpp"
 
 using hyperlite::BackendKind;
 using hyperlite::Color;
 using hyperlite::DrawCommand;
 using hyperlite::Engine;
+using hyperlite::Game;
 
 /**
  * Python object that wraps one native engine instance.
@@ -22,6 +24,7 @@ using hyperlite::Engine;
 typedef struct {
 	PyObject_HEAD
 	Engine* native_engine;
+	int owns_engine;
 } PyEngineObject;
 
 /**
@@ -202,6 +205,7 @@ static PyObject* PyEngine_new(PyTypeObject* type, PyObject* args, PyObject* kwar
 		return nullptr;
 	}
 	self->native_engine = nullptr;
+	self->owns_engine = 1;
 	return reinterpret_cast<PyObject*>(self);
 }
 
@@ -243,6 +247,7 @@ static int PyEngine_init(PyEngineObject* self, PyObject* args, PyObject* kwargs)
 
 	try {
 		self->native_engine = new Engine(width, height, ParseBackendKind(backend), title, present_mode);
+		self->owns_engine = 1;
 	} catch (const std::exception& ex) {
 		PyErr_SetString(PyExc_RuntimeError, ex.what());
 		return -1;
@@ -254,7 +259,9 @@ static int PyEngine_init(PyEngineObject* self, PyObject* args, PyObject* kwargs)
  * Destroy native engine resources when object is collected.
  */
 static void PyEngine_dealloc(PyEngineObject* self) {
-	delete self->native_engine;
+	if (self->owns_engine) {
+		delete self->native_engine;
+	}
 	self->native_engine = nullptr;
 	Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
 }
@@ -2200,6 +2207,310 @@ static PyTypeObject PyEngineType = {
 	PyVarObject_HEAD_INIT(nullptr, 0)
 };
 
+typedef struct {
+	PyObject_HEAD
+	Game* native_game;
+	PyObject* frame_cb;
+} PyGameObject;
+
+/**
+ * Optional Python per-frame hook. Not required — Game.run() is native.
+ */
+static void PyGame_FrameTrampoline(Game& game, void* user) {
+	(void)game;
+	auto* self = static_cast<PyGameObject*>(user);
+	if (self == nullptr || self->frame_cb == nullptr) {
+		return;
+	}
+	PyGILState_STATE state = PyGILState_Ensure();
+	PyObject* result = PyObject_CallNoArgs(self->frame_cb);
+	Py_XDECREF(result);
+	if (PyErr_Occurred()) {
+		PyErr_Print();
+		self->native_game->RequestQuit();
+	}
+	PyGILState_Release(state);
+}
+
+static PyObject* PyGame_new(PyTypeObject* type, PyObject* args, PyObject* kwargs) {
+	(void)args;
+	(void)kwargs;
+	auto* self = reinterpret_cast<PyGameObject*>(type->tp_alloc(type, 0));
+	if (!self) {
+		return nullptr;
+	}
+	self->native_game = nullptr;
+	self->frame_cb = nullptr;
+	return reinterpret_cast<PyObject*>(self);
+}
+
+static int PyGame_init(PyGameObject* self, PyObject* args, PyObject* kwargs) {
+	static const char* kwlist[] = {"width", "height", "backend", "title", "present", nullptr};
+	int width = 0;
+	int height = 0;
+	const char* backend = "cpu";
+	const char* title = "Hyperlite Game";
+	const char* present = "auto";
+	if (!PyArg_ParseTupleAndKeywords(
+			args, kwargs, "ii|sss", const_cast<char**>(kwlist), &width, &height, &backend, &title, &present)) {
+		return -1;
+	}
+	hyperlite::PresentMode present_mode = hyperlite::PresentMode::kAuto;
+	if (present != nullptr) {
+		if (std::strcmp(present, "headless") == 0) {
+			present_mode = hyperlite::PresentMode::kHeadless;
+		} else if (std::strcmp(present, "window") == 0) {
+			present_mode = hyperlite::PresentMode::kWindow;
+		} else if (std::strcmp(present, "auto") != 0) {
+			PyErr_SetString(PyExc_ValueError, "present must be 'auto', 'headless', or 'window'");
+			return -1;
+		}
+	}
+	try {
+		self->native_game = new Game(width, height, ParseBackendKind(backend), title, present_mode);
+	} catch (const std::exception& ex) {
+		PyErr_SetString(PyExc_RuntimeError, ex.what());
+		return -1;
+	}
+	return 0;
+}
+
+static void PyGame_dealloc(PyGameObject* self) {
+	Py_XDECREF(self->frame_cb);
+	self->frame_cb = nullptr;
+	delete self->native_game;
+	self->native_game = nullptr;
+	Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
+}
+
+static PyObject* PyGame_run(PyGameObject* self, PyObject* args) {
+	(void)args;
+	Py_BEGIN_ALLOW_THREADS
+	self->native_game->Run();
+	Py_END_ALLOW_THREADS
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_step(PyGameObject* self, PyObject* args) {
+	(void)args;
+	self->native_game->Step();
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_request_quit(PyGameObject* self, PyObject* args) {
+	(void)args;
+	self->native_game->RequestQuit();
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_set_target_fps(PyGameObject* self, PyObject* args) {
+	double fps = 0.0;
+	if (!PyArg_ParseTuple(args, "d", &fps)) {
+		return nullptr;
+	}
+	self->native_game->SetTargetFps(fps);
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_set_max_frames(PyGameObject* self, PyObject* args) {
+	int n = 0;
+	if (!PyArg_ParseTuple(args, "i", &n)) {
+		return nullptr;
+	}
+	self->native_game->SetMaxFrames(n);
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_delta_time(PyGameObject* self, PyObject* args) {
+	(void)args;
+	return PyFloat_FromDouble(self->native_game->DeltaTime());
+}
+
+static PyObject* PyGame_frame_index(PyGameObject* self, PyObject* args) {
+	(void)args;
+	return PyLong_FromUnsignedLongLong(self->native_game->FrameIndex());
+}
+
+static PyObject* PyGame_set_clear_color(PyGameObject* self, PyObject* args) {
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "iii|i", &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	self->native_game->SetClearColor(hyperlite::PackColor({
+		static_cast<std::uint8_t>(r),
+		static_cast<std::uint8_t>(g),
+		static_cast<std::uint8_t>(b),
+		static_cast<std::uint8_t>(a)}));
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_on_frame(PyGameObject* self, PyObject* args) {
+	PyObject* cb = nullptr;
+	if (!PyArg_ParseTuple(args, "O", &cb)) {
+		return nullptr;
+	}
+	if (cb == Py_None) {
+		Py_XDECREF(self->frame_cb);
+		self->frame_cb = nullptr;
+		self->native_game->SetFrameHook(nullptr, nullptr);
+		Py_RETURN_NONE;
+	}
+	if (!PyCallable_Check(cb)) {
+		PyErr_SetString(PyExc_TypeError, "on_frame callback must be callable");
+		return nullptr;
+	}
+	Py_INCREF(cb);
+	Py_XDECREF(self->frame_cb);
+	self->frame_cb = cb;
+	self->native_game->SetFrameHook(&PyGame_FrameTrampoline, self);
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_engine(PyGameObject* self, PyObject* args) {
+	(void)args;
+	auto* eng = reinterpret_cast<PyEngineObject*>(PyEngineType.tp_alloc(&PyEngineType, 0));
+	if (eng == nullptr) {
+		return nullptr;
+	}
+	eng->native_engine = &self->native_game->GetEngine();
+	eng->owns_engine = 0;
+	return reinterpret_cast<PyObject*>(eng);
+}
+
+static PyObject* PyGame_key_down(PyGameObject* self, PyObject* args) {
+	int vk = 0;
+	if (!PyArg_ParseTuple(args, "i", &vk)) {
+		return nullptr;
+	}
+	return PyBool_FromLong(self->native_game->Input().KeyDown(vk) ? 1 : 0);
+}
+
+static PyObject* PyGame_key_pressed(PyGameObject* self, PyObject* args) {
+	int vk = 0;
+	if (!PyArg_ParseTuple(args, "i", &vk)) {
+		return nullptr;
+	}
+	return PyBool_FromLong(self->native_game->Input().KeyPressed(vk) ? 1 : 0);
+}
+
+static PyObject* PyGame_key_released(PyGameObject* self, PyObject* args) {
+	int vk = 0;
+	if (!PyArg_ParseTuple(args, "i", &vk)) {
+		return nullptr;
+	}
+	return PyBool_FromLong(self->native_game->Input().KeyReleased(vk) ? 1 : 0);
+}
+
+static PyObject* PyGame_map_action(PyGameObject* self, PyObject* args) {
+	const char* name = nullptr;
+	int vk = 0;
+	if (!PyArg_ParseTuple(args, "si", &name, &vk)) {
+		return nullptr;
+	}
+	hyperlite::InputAction act{};
+	act.name = name != nullptr ? name : "";
+	act.keys.push_back(vk);
+	const int id = self->native_game->Input().MapAction(act);
+	return PyLong_FromLong(id);
+}
+
+static PyObject* PyGame_action_down(PyGameObject* self, PyObject* args) {
+	const char* name = nullptr;
+	if (!PyArg_ParseTuple(args, "s", &name)) {
+		return nullptr;
+	}
+	return PyBool_FromLong(self->native_game->Input().ActionDown(name) ? 1 : 0);
+}
+
+static PyObject* PyGame_create_entity(PyGameObject* self, PyObject* args) {
+	(void)args;
+	const hyperlite::Entity e = self->native_game->GetWorld().Create();
+	return Py_BuildValue("(II)", e.index, e.generation);
+}
+
+static PyObject* PyGame_destroy_entity(PyGameObject* self, PyObject* args) {
+	unsigned int index = 0;
+	unsigned int gen = 0;
+	if (!PyArg_ParseTuple(args, "II", &index, &gen)) {
+		return nullptr;
+	}
+	self->native_game->GetWorld().Destroy({index, gen});
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_draw_mesh_instances(PyGameObject* self, PyObject* args) {
+	int mesh_id = 0;
+	PyObject* models = nullptr;
+	int r = 255;
+	int g = 255;
+	int b = 255;
+	int a = 255;
+	if (!PyArg_ParseTuple(args, "iO|iiii", &mesh_id, &models, &r, &g, &b, &a)) {
+		return nullptr;
+	}
+	Py_buffer view{};
+	if (PyObject_GetBuffer(models, &view, PyBUF_CONTIG_RO) != 0) {
+		return nullptr;
+	}
+	const std::size_t floats = static_cast<std::size_t>(view.len) / sizeof(float);
+	const std::size_t count = floats / 16U;
+	self->native_game->DrawMeshInstances(
+		mesh_id,
+		static_cast<const float*>(view.buf),
+		count,
+		hyperlite::PackColor({
+			static_cast<std::uint8_t>(r),
+			static_cast<std::uint8_t>(g),
+			static_cast<std::uint8_t>(b),
+			static_cast<std::uint8_t>(a)}));
+	PyBuffer_Release(&view);
+	Py_RETURN_NONE;
+}
+
+static PyObject* PyGame_profiler_ms(PyGameObject* self, PyObject* args) {
+	(void)args;
+	hyperlite::Profiler& p = self->native_game->GetProfiler();
+	return Py_BuildValue(
+		"{s:f,s:f,s:f,s:f,s:f,s:f,s:f}",
+		"frame", p.Ms(hyperlite::Profiler::Frame),
+		"input", p.Ms(hyperlite::Profiler::Input),
+		"transform", p.Ms(hyperlite::Profiler::Transform),
+		"culling", p.Ms(hyperlite::Profiler::Culling),
+		"render", p.Ms(hyperlite::Profiler::Render),
+		"physics", p.Ms(hyperlite::Profiler::Physics),
+		"ai", p.Ms(hyperlite::Profiler::Ai));
+}
+
+static PyMethodDef PyGame_methods[] = {
+	{"run", reinterpret_cast<PyCFunction>(PyGame_run), METH_NOARGS, "Native main loop (no Python while-True required)."},
+	{"step", reinterpret_cast<PyCFunction>(PyGame_step), METH_NOARGS, "One native frame."},
+	{"request_quit", reinterpret_cast<PyCFunction>(PyGame_request_quit), METH_NOARGS, "Request the native loop to exit."},
+	{"set_target_fps", reinterpret_cast<PyCFunction>(PyGame_set_target_fps), METH_VARARGS, "Frame pacing (0 = uncapped)."},
+	{"set_max_frames", reinterpret_cast<PyCFunction>(PyGame_set_max_frames), METH_VARARGS, "Stop after N frames (tests / headless)."},
+	{"delta_time", reinterpret_cast<PyCFunction>(PyGame_delta_time), METH_NOARGS, "Seconds since previous native step."},
+	{"frame_index", reinterpret_cast<PyCFunction>(PyGame_frame_index), METH_NOARGS, "Completed native frames."},
+	{"set_clear_color", reinterpret_cast<PyCFunction>(PyGame_set_clear_color), METH_VARARGS, "RGBA clear used by Game.run auto-clear."},
+	{"on_frame", reinterpret_cast<PyCFunction>(PyGame_on_frame), METH_VARARGS, "Optional Python callback; not required for run()."},
+	{"engine", reinterpret_cast<PyCFunction>(PyGame_engine), METH_NOARGS, "Borrowed Engine escape hatch (does not own the native engine)."},
+	{"key_down", reinterpret_cast<PyCFunction>(PyGame_key_down), METH_VARARGS, "Held key (VK code)."},
+	{"key_pressed", reinterpret_cast<PyCFunction>(PyGame_key_pressed), METH_VARARGS, "Key transitioned down this frame."},
+	{"key_released", reinterpret_cast<PyCFunction>(PyGame_key_released), METH_VARARGS, "Key transitioned up this frame."},
+	{"map_action", reinterpret_cast<PyCFunction>(PyGame_map_action), METH_VARARGS, "Bind action name to a virtual-key."},
+	{"action_down", reinterpret_cast<PyCFunction>(PyGame_action_down), METH_VARARGS, "Whether a mapped action is held."},
+	{"create_entity", reinterpret_cast<PyCFunction>(PyGame_create_entity), METH_NOARGS, "Create a native entity handle (index, generation)."},
+	{"destroy_entity", reinterpret_cast<PyCFunction>(PyGame_destroy_entity), METH_VARARGS, "Destroy entity by (index, generation)."},
+	{"draw_mesh_instances", reinterpret_cast<PyCFunction>(PyGame_draw_mesh_instances), METH_VARARGS, "Batch draw mesh from float32 Nx16 model matrices."},
+	{"profiler_ms", reinterpret_cast<PyCFunction>(PyGame_profiler_ms), METH_NOARGS, "Native section timings in milliseconds."},
+	{nullptr, nullptr, 0, nullptr},
+};
+
+static PyTypeObject PyGameType = {
+	PyVarObject_HEAD_INIT(nullptr, 0)
+};
+
 static PyModuleDef HyperliteModule = {
 	PyModuleDef_HEAD_INIT,
 	"hyperlite",
@@ -2229,6 +2540,18 @@ PyMODINIT_FUNC PyInit_hyperlite() {
 		return nullptr;
 	}
 
+	PyGameType.tp_name = "hyperlite.Game";
+	PyGameType.tp_basicsize = sizeof(PyGameObject);
+	PyGameType.tp_flags = Py_TPFLAGS_DEFAULT;
+	PyGameType.tp_doc = "Native game runtime. Python configures; C++ owns the loop and hot path.";
+	PyGameType.tp_new = PyGame_new;
+	PyGameType.tp_init = reinterpret_cast<initproc>(PyGame_init);
+	PyGameType.tp_dealloc = reinterpret_cast<destructor>(PyGame_dealloc);
+	PyGameType.tp_methods = PyGame_methods;
+	if (PyType_Ready(&PyGameType) < 0) {
+		return nullptr;
+	}
+
 	PyObject* module = PyModule_Create(&HyperliteModule);
 	if (!module) {
 		return nullptr;
@@ -2237,6 +2560,13 @@ PyMODINIT_FUNC PyInit_hyperlite() {
 	Py_INCREF(&PyEngineType);
 	if (PyModule_AddObject(module, "Engine", reinterpret_cast<PyObject*>(&PyEngineType)) < 0) {
 		Py_DECREF(&PyEngineType);
+		Py_DECREF(module);
+		return nullptr;
+	}
+
+	Py_INCREF(&PyGameType);
+	if (PyModule_AddObject(module, "Game", reinterpret_cast<PyObject*>(&PyGameType)) < 0) {
+		Py_DECREF(&PyGameType);
 		Py_DECREF(module);
 		return nullptr;
 	}

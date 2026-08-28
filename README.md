@@ -34,6 +34,7 @@ HYPERLITE_HEADLESS=1 .venv/bin/python -c "import hyperlite; e=hyperlite.Engine(6
 Or: `bash scripts/install.sh`
 
 **Full documentation:** [docs/guide.md](docs/guide.md) — installation, API, game loop, GPU path, examples.  
+**Native game runtime (optional):** [docs/game-runtime.md](docs/game-runtime.md) — `Game.run()`, jobs, input, world, physics, audio, UI.  
 **Linux bench numbers:** [docs/linux-bench.md](docs/linux-bench.md)  
 **3D wireframe (Layer 0) + filled tris (Layer 1):** [docs/3d-plan.md](docs/3d-plan.md) · [docs/3d-wireframe-bench.md](docs/3d-wireframe-bench.md) · [docs/3d-tri-bench.md](docs/3d-tri-bench.md)  
 **Procedural continent stress game:** [docs/proc-world.md](docs/proc-world.md) — high-detail flyable bench (`python/examples/proc_world.py`).
