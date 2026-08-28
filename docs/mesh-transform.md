@@ -94,6 +94,7 @@ Interleaved 8 pairs vs post-#28 `main` on this VM (Release headless, `HYPERLITE_
 | OpenMP over triangles (fill) | **Not tried** (forbidden without per-tile ownership) |
 | OpenMP over vertices (64-vert chunks, ≥512 verts) | **Shipped** — mesh flat ~+3.4%, textured ~+2% (interleaved 8 pairs); emit/index loop still serial |
 | Indexed emit fast path (`emplace_back`, range loops, prefetch) | **Shipped** — mesh flat ~+2.3%; textured ~flat |
+| SoA mesh vertex buffers (`clip_x/y/z/w` instead of `ClipVert` AoS) | **Dropped** — mesh flat ~−2.1% (interleaved 8 pairs); trivial-accept emit already skips clip gather. **Do not retry**. |
 | OpenMP over indexed emit (thread-local `ScreenTri` lists + merge, ≥4096 tris) | **Dropped** — ~−2% mesh flat on 9800-tris grid; fork + list merge overhead exceeds parallel gain |
 | SIMD batch outcode accept/reject (4–8 tris) | **Not tried** — serial fast path already near noise on headline benches |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
@@ -146,6 +147,32 @@ Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP
 | `RasterScreenTriTile` `const ScreenTri&` + local fill geom | **Noise** — see tables above |
 | Geometry-first `ScreenTri` + flat emit without `iw` | **Noise** — no consistent mesh win |
 | Cached `area2` at emit | **Not tried** (no signal from 1–2) |
+
+## SoA mesh vertex buffers (post-#29) {#soa-mesh-vertex-buffers-post-29}
+
+**Hypothesis:** after indexed emit fast path (#29), the serial emit loop still dominates; storing transformed mesh vertices as **SoA** (`clip_x/y/z/w` + existing `px/py/zw/iw` + `outcodes`) instead of `ClipVert` AoS would make indexed emit use sequential component loads instead of 3 AoS gathers per triangle on the rare clip path, and let AVX2 transform store clip components directly.
+
+**Tried:** `MeshDrawScratch` replaced `clip_verts` with `clip_x/y/z/w`; `TransformMeshPositionsRange` writes SoA (AVX2 stores directly to component arrays); `EmitIndexedFlatRange` / `EmitIndexedTexturedRange` / `EmitIndexedClipTri` read SoA via `GatherClipVert` on partial-clip tris only. Scalar portable path uses `ComputeClipOutcodeSoA` / `ProjectToPixelsSoA`. Public API unchanged.
+
+### Paired benches (this VM, interleaved 8 pairs)
+
+Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP. Baseline: `main` @ `1905fa8` (post-#29).
+
+| Bench | Before (tris/s) | After (tris/s) | Δ |
+|-------|-----------------|----------------|---|
+| `cpu_mesh_bench` flat | **12.71e6** | **12.44e6** | **~−2.1%** |
+| `cpu_mesh_bench` textured | **10.02e6** | **10.05e6** | **~flat** |
+| `cpu_mesh_bench` occluded | **8.13e6** | **8.14e6** | **~flat** |
+| `cpu_mesh_bench` occluded-2draw | **6.57e6** | **6.56e6** | **~flat** |
+| `cpu_tri_bench` (immediate) | **9.98e6** | **10.06e6** | **~flat** |
+| `cpu_tri_bench` occluded | **7.10e6** | **7.14e6** | **~flat** |
+| `cpu_tri_bench` occluded-2draw | **5.08e6** | **5.07e6** | **~flat** |
+
+**Outcome: not shipped.** Primary mesh flat regressed ~2% (outside noise, below the ~+2% win bar). Trivial-accept indexed emit already avoided clip_verts; extra SoA arrays add memory traffic without helping the hot path. Engine reverted; **do not retry** SoA clip layout unless profiling shows AoS gather in emit samples.
+
+| Experiment | Result |
+|------------|--------|
+| SoA `clip_x/y/z/w` in `MeshDrawScratch` + transform/emit readers | **Loss** on mesh flat (~−2.1%); other benches ~flat |
 
 ## Reproduce
 
