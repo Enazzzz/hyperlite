@@ -77,6 +77,8 @@ game.run()
 
 C++-only (include `engine/runtime/game.hpp`): jobs, world/scene, physics, collision, spatial, streaming, nav, AI, software mixer `Mix()`, bitmap font, immediate UI, save/load, CPU shader VM, lights, shadows, particles, animation.
 
+`hyperlite.Keys` exports Escape, Tab, WASD, arrows, Space, F11, Return (same VK map on Win32 / X11 / Cocoa).
+
 ## C++ surface
 
 ```cpp

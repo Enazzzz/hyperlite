@@ -2,6 +2,8 @@
 
 Measured on the Hyperlite Linux cloud VM (same class as [linux-bench.md](linux-bench.md) / [3d-tri-bench.md](3d-tri-bench.md)). Numbers are real wall-clock results from Release builds — not estimates.
 
+> **Current production:** mesh fill uses **128×128** raster tiles. The OpenMP note below is the **64×64** bin size used when these numbers were taken. See [3d-plan.md](3d-plan.md).
+
 ## Machine
 
 | Item | Value |

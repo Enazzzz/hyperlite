@@ -21,7 +21,7 @@ Per batch:
 1. `FlushPending2d()` once (same as `draw_mesh`).
 2. For each instance: `view_proj × model` → transform-once clip/emit (PR #10 scratch).
 3. Append all `ScreenTri`s into shared `MeshDrawScratch::screen`.
-4. **One** `RasterScreenTrisTiled` (64×64 bins, OpenMP over tiles, Hi-Z per tile).
+4. **One** `RasterScreenTrisTiled` (128×128 raster bins, OpenMP over tiles, Hi-Z per tile). Dirty present tiles remain 64px.
 
 Transform/clip cost still scales with instances × vertices; bin + fill + Python call overhead drops from **O(draws)** to **O(batches)**.
 

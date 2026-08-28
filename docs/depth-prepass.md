@@ -2,6 +2,8 @@
 
 Investigation of three engine-side changes aimed at **overdraw** and **depth bandwidth** after tile Hi-Z and SIMD opaque fill landed. None improved the standard benches on this VM; all were reverted. Public Python API unchanged.
 
+> **Current production:** raster tiles are **128×128**. Table rows that say 64×64 describe the Hi-Z grid used during these experiments.
+
 ## Context
 
 | Mechanism already shipped | Effect |
@@ -119,7 +121,7 @@ Portable ISA: `-DHYPERLITE_MARCH=x86-64` (see [simd-tri-fill.md](simd-tri-fill.m
 | 16×16 subtile Hi-Z | Regressed | Regressed | **No** |
 | Tile AABB depth probe (pre-edge) | ~noise | ~noise | **No** |
 
-**Keep:** float32 depth, single-pass raster, 64×64 tile Hi-Z, 8-wide SIMD fill.
+**Keep:** float32 depth, single-pass raster, per-tile Hi-Z (tiles are **128×128** in current code), 8-wide SIMD fill.
 
 **Next engine directions** (not tried here): SIMD/max-reduction in `ScanTileMaxDepth`; profile-guided gates tied to **estimated overlap** (tile bin count alone is a poor proxy).
 

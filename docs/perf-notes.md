@@ -13,15 +13,15 @@
 - `lines_bulk()` queues thousands of segments from one int32 buffer without per-line Python overhead.
 - Line color/width sort (default threshold 64) groups wireframe draws before batch execution.
 - Default command buffer reserve 65536 (~1.5 MB), grows automatically when exceeded.
-- Built-in vsync: `set_vsync(True)` — DXGI sync interval (default) or DwmFlush on GDI fallback.
-- **DXGI flip-model present is default** on Windows — CPU host upload via `UpdateSubresource` + swapchain `Present`. GDI BitBlt is fallback only when DXGI init fails.
+- Built-in vsync: `set_vsync(True)` — DXGI sync interval (Windows default), DwmFlush on GDI fallback, `CVDisplayLink` on macOS.
+- **Present** copies Hyperlite’s host RGBA8: DXGI flip-model (Windows default; GDI BitBlt if DXGI init fails), X11 MIT-SHM (Linux), Cocoa `CALayer.contents` (macOS). Dirty CPU present tiles are **64px**; triangle/mesh raster tiles are **128×128**.
 
 ## Backend Cheat Sheet
 
 | Workload | Backend | API |
 |----------|---------|-----|
-| Vector / HUD games | `cpu` | `line`, `rect_fill`, `tick()` — DXGI present by default |
-| Wireframe / debug draw | `cpu` | `lines_bulk`, `tick_lines` — DXGI present by default |
+| Vector / HUD games | `cpu` | `line`, `rect_fill`, `tick()` — OS blit of host RGBA8 |
+| Wireframe / debug draw | `cpu` | `lines_bulk`, `tick_lines` — same present path |
 | Many sprites | `cpu` or `gpu` + atlas | `load_atlas`, `draw_sprite`, `tick_blits` |
 | Static tilemaps | either | `commit_retained_layer`, `draw_retained_layer` |
 | Full-screen software raster | `gpu` | NumPy → `upload_frame_rgba` |

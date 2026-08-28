@@ -1,6 +1,8 @@
 # Tile Hi-Z depth reject (Layer 1 CPU fill)
 
-Per-64×64-tile hierarchical depth for the CPU triangle raster. When a tile’s farthest stored window depth is nearer than a triangle’s closest vertex depth, the tile skips the pixel loop for that triangle.
+> **Current production:** raster tiles are **128×128**. This page records Hi-Z as implemented on **64×64** tiles; the reject rule is the same, per raster tile.
+
+Per-tile hierarchical depth for the CPU triangle raster. When a tile’s farthest stored window depth is nearer than a triangle’s closest vertex depth, the tile skips the pixel loop for that triangle.
 
 ## Mechanism
 
