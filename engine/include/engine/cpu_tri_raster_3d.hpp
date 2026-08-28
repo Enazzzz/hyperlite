@@ -2149,6 +2149,112 @@ inline int ClipTriangleHomogeneousPartial(
 }
 
 /**
+ * Trivial-accept flat tri append (outcodes already verified zero; no atlas/UV work).
+ */
+inline bool TryAppendFlatScreenTriFast(
+	std::vector<ScreenTri>& out,
+	const float x0,
+	const float y0,
+	const float zw0,
+	const float iw0,
+	const float x1,
+	const float y1,
+	const float zw1,
+	const float iw1,
+	const float x2,
+	const float y2,
+	const float zw2,
+	const float iw2,
+	const std::uint32_t color,
+	const bool cull_backfaces) {
+	const float area = ScreenSignedArea2(x0, y0, x1, y1, x2, y2);
+	if (cull_backfaces) {
+		if (area >= 0.0f) {
+			return false;
+		}
+	} else if (std::fabs(area) < 1e-8f) {
+		return false;
+	}
+	ScreenTri& tri = out.emplace_back();
+	tri.x0 = x0;
+	tri.y0 = y0;
+	tri.zw0 = zw0;
+	tri.iw0 = iw0;
+	tri.x1 = x1;
+	tri.y1 = y1;
+	tri.zw1 = zw1;
+	tri.iw1 = iw1;
+	tri.x2 = x2;
+	tri.y2 = y2;
+	tri.zw2 = zw2;
+	tri.iw2 = iw2;
+	tri.color = color;
+	return true;
+}
+
+/**
+ * Trivial-accept textured tri append (outcodes already verified zero).
+ */
+inline bool TryAppendTexturedScreenTriFast(
+	std::vector<ScreenTri>& out,
+	const float x0,
+	const float y0,
+	const float zw0,
+	const float iw0,
+	const float u0,
+	const float v0,
+	const float x1,
+	const float y1,
+	const float zw1,
+	const float iw1,
+	const float u1,
+	const float v1,
+	const float x2,
+	const float y2,
+	const float zw2,
+	const float iw2,
+	const float u2,
+	const float v2,
+	const std::uint32_t color,
+	const bool cull_backfaces,
+	const std::uint8_t* atlas_rgba,
+	const int atlas_w,
+	const int atlas_h) {
+	const float area = ScreenSignedArea2(x0, y0, x1, y1, x2, y2);
+	if (cull_backfaces) {
+		if (area >= 0.0f) {
+			return false;
+		}
+	} else if (std::fabs(area) < 1e-8f) {
+		return false;
+	}
+	ScreenTri& tri = out.emplace_back();
+	tri.x0 = x0;
+	tri.y0 = y0;
+	tri.zw0 = zw0;
+	tri.iw0 = iw0;
+	tri.u0 = u0;
+	tri.v0 = v0;
+	tri.x1 = x1;
+	tri.y1 = y1;
+	tri.zw1 = zw1;
+	tri.iw1 = iw1;
+	tri.u1 = u1;
+	tri.v1 = v1;
+	tri.x2 = x2;
+	tri.y2 = y2;
+	tri.zw2 = zw2;
+	tri.iw2 = iw2;
+	tri.u2 = u2;
+	tri.v2 = v2;
+	tri.color = color;
+	tri.atlas_rgba = atlas_rgba;
+	tri.atlas_w = atlas_w;
+	tri.atlas_h = atlas_h;
+	return true;
+}
+
+/**
  * Emit one indexed triangle from pre-transformed clip verts (flat or textured).
  *
  * Trivial-accept uses project-once screen attrs; partial clips run Sutherland–Hodgman.
@@ -2184,16 +2290,26 @@ inline void EmitIndexedClipTri(
 		return;
 	}
 	if ((ca | cb | cc) == 0) {
-		TryAppendScreenTri(
-			out,
-			px[i0], py[i0], zw[i0], iw[i0], u0, v0,
-			px[i1], py[i1], zw[i1], iw[i1], u1, v1,
-			px[i2], py[i2], zw[i2], iw[i2], u2, v2,
-			color,
-			cull_backfaces,
-			atlas_rgba,
-			atlas_w,
-			atlas_h);
+		if (atlas_rgba == nullptr) {
+			TryAppendFlatScreenTriFast(
+				out,
+				px[i0], py[i0], zw[i0], iw[i0],
+				px[i1], py[i1], zw[i1], iw[i1],
+				px[i2], py[i2], zw[i2], iw[i2],
+				color,
+				cull_backfaces);
+		} else {
+			TryAppendTexturedScreenTriFast(
+				out,
+				px[i0], py[i0], zw[i0], iw[i0], u0, v0,
+				px[i1], py[i1], zw[i1], iw[i1], u1, v1,
+				px[i2], py[i2], zw[i2], iw[i2], u2, v2,
+				color,
+				cull_backfaces,
+				atlas_rgba,
+				atlas_w,
+				atlas_h);
+		}
 		return;
 	}
 	ClipVert a = clip_verts[i0];
@@ -2208,6 +2324,164 @@ inline void EmitIndexedClipTri(
 	ClipVert clipped[16];
 	const int n = ClipTriangleHomogeneousPartial(a, b, c, clipped);
 	ProjectFanToScreen(out, clipped, n, width, height, color, cull_backfaces, atlas_rgba, atlas_w, atlas_h);
+}
+
+/**
+ * Emit indexed flat tris in [tri_begin, tri_end) from pre-transformed clip attrs.
+ */
+inline void EmitIndexedFlatRange(
+	std::vector<ScreenTri>& out,
+	const ClipVert* clip_verts,
+	const int* outcodes,
+	const float* px,
+	const float* py,
+	const float* zw,
+	const float* iw,
+	const std::uint32_t* indices,
+	const std::size_t tri_begin,
+	const std::size_t tri_end,
+	const int width,
+	const int height,
+	const std::uint32_t color,
+	const bool cull_backfaces) {
+	for (std::size_t t = tri_begin; t < tri_end; ++t) {
+		const std::size_t base = t * 3U;
+		const std::uint32_t i0 = indices[base];
+		const std::uint32_t i1 = indices[base + 1U];
+		const std::uint32_t i2 = indices[base + 2U];
+#if defined(__GNUC__) || defined(__clang__)
+		if (t + 2U < tri_end) {
+			const std::size_t pf_base = (t + 2U) * 3U;
+			__builtin_prefetch(&indices[pf_base], 0, 1);
+			__builtin_prefetch(&outcodes[indices[pf_base]], 0, 1);
+			__builtin_prefetch(&px[indices[pf_base]], 0, 1);
+		}
+#endif
+		const int ca = outcodes[i0];
+		const int cb = outcodes[i1];
+		const int cc = outcodes[i2];
+		if ((ca & cb & cc) != 0) {
+			continue;
+		}
+		if ((ca | cb | cc) == 0) {
+			TryAppendFlatScreenTriFast(
+				out,
+				px[i0], py[i0], zw[i0], iw[i0],
+				px[i1], py[i1], zw[i1], iw[i1],
+				px[i2], py[i2], zw[i2], iw[i2],
+				color,
+				cull_backfaces);
+			continue;
+		}
+		EmitIndexedClipTri(
+			out,
+			clip_verts,
+			outcodes,
+			px,
+			py,
+			zw,
+			iw,
+			i0,
+			i1,
+			i2,
+			width,
+			height,
+			color,
+			cull_backfaces,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			nullptr,
+			0,
+			0);
+	}
+}
+
+/**
+ * Emit indexed textured tris in [tri_begin, tri_end) from pre-transformed clip attrs.
+ */
+inline void EmitIndexedTexturedRange(
+	std::vector<ScreenTri>& out,
+	const ClipVert* clip_verts,
+	const int* outcodes,
+	const float* px,
+	const float* py,
+	const float* zw,
+	const float* iw,
+	const float* uvs,
+	const std::uint32_t* indices,
+	const std::size_t tri_begin,
+	const std::size_t tri_end,
+	const int width,
+	const int height,
+	const std::uint32_t color,
+	const bool cull_backfaces,
+	const std::uint8_t* atlas_rgba,
+	const int atlas_w,
+	const int atlas_h) {
+	for (std::size_t t = tri_begin; t < tri_end; ++t) {
+		const std::size_t base = t * 3U;
+		const std::uint32_t i0 = indices[base];
+		const std::uint32_t i1 = indices[base + 1U];
+		const std::uint32_t i2 = indices[base + 2U];
+#if defined(__GNUC__) || defined(__clang__)
+		if (t + 2U < tri_end) {
+			const std::size_t pf_base = (t + 2U) * 3U;
+			__builtin_prefetch(&indices[pf_base], 0, 1);
+			__builtin_prefetch(&outcodes[indices[pf_base]], 0, 1);
+			__builtin_prefetch(&uvs[static_cast<std::size_t>(indices[pf_base]) * 2U], 0, 1);
+		}
+#endif
+		const int ca = outcodes[i0];
+		const int cb = outcodes[i1];
+		const int cc = outcodes[i2];
+		if ((ca & cb & cc) != 0) {
+			continue;
+		}
+		const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
+		const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
+		const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
+		if ((ca | cb | cc) == 0) {
+			TryAppendTexturedScreenTriFast(
+				out,
+				px[i0], py[i0], zw[i0], iw[i0], t0[0], t0[1],
+				px[i1], py[i1], zw[i1], iw[i1], t1[0], t1[1],
+				px[i2], py[i2], zw[i2], iw[i2], t2[0], t2[1],
+				color,
+				cull_backfaces,
+				atlas_rgba,
+				atlas_w,
+				atlas_h);
+			continue;
+		}
+		EmitIndexedClipTri(
+			out,
+			clip_verts,
+			outcodes,
+			px,
+			py,
+			zw,
+			iw,
+			i0,
+			i1,
+			i2,
+			width,
+			height,
+			color,
+			cull_backfaces,
+			t0[0],
+			t0[1],
+			t1[0],
+			t1[1],
+			t2[0],
+			t2[1],
+			atlas_rgba,
+			atlas_w,
+			atlas_h);
+	}
 }
 
 /**
@@ -2688,49 +2962,78 @@ inline void AppendFlatMeshTris(
 		width,
 		height);
 
-	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
-		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
-			return;
-		}
-		detail3d::EmitIndexedClipTri(
-			screen,
-			scratch.clip_verts.data(),
-			scratch.outcodes.data(),
-			scratch.px.data(),
-			scratch.py.data(),
-			scratch.zw.data(),
-			scratch.iw.data(),
-			i0,
-			i1,
-			i2,
-			width,
-			height,
-			tri_color,
-			cull_backfaces,
-			0.0f,
-			0.0f,
-			0.0f,
-			0.0f,
-			0.0f,
-			0.0f,
-			nullptr,
-			0,
-			0);
-	};
+	const detail3d::ClipVert* clip_verts = scratch.clip_verts.data();
+	const int* codes = scratch.outcodes.data();
+	const float* px = scratch.px.data();
+	const float* py = scratch.py.data();
+	const float* zw = scratch.zw.data();
+	const float* iw = scratch.iw.data();
 
 	if (index_count > 0U && indices != nullptr) {
 		const std::size_t tri_count = index_count / 3U;
 		screen.reserve(screen.size() + tri_count);
-		for (std::size_t t = 0U; t < tri_count; ++t) {
-			const std::size_t base = t * 3U;
-			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
-		}
+		detail3d::EmitIndexedFlatRange(
+			screen,
+			clip_verts,
+			codes,
+			px,
+			py,
+			zw,
+			iw,
+			indices,
+			0U,
+			tri_count,
+			width,
+			height,
+			tri_color,
+			cull_backfaces);
 	} else {
 		const std::size_t tri_count = vertex_count / 3U;
 		screen.reserve(screen.size() + tri_count);
 		for (std::size_t t = 0U; t < tri_count; ++t) {
 			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
-			emit_indexed(i0, i0 + 1U, i0 + 2U);
+			const std::uint32_t i1 = i0 + 1U;
+			const std::uint32_t i2 = i0 + 2U;
+			const int ca = codes[i0];
+			const int cb = codes[i1];
+			const int cc = codes[i2];
+			if ((ca & cb & cc) != 0) {
+				continue;
+			}
+			if ((ca | cb | cc) == 0) {
+				detail3d::TryAppendFlatScreenTriFast(
+					screen,
+					px[i0], py[i0], zw[i0], iw[i0],
+					px[i1], py[i1], zw[i1], iw[i1],
+					px[i2], py[i2], zw[i2], iw[i2],
+					tri_color,
+					cull_backfaces);
+				continue;
+			}
+			detail3d::EmitIndexedClipTri(
+				screen,
+				clip_verts,
+				codes,
+				px,
+				py,
+				zw,
+				iw,
+				i0,
+				i1,
+				i2,
+				width,
+				height,
+				tri_color,
+				cull_backfaces,
+				0.0f,
+				0.0f,
+				0.0f,
+				0.0f,
+				0.0f,
+				0.0f,
+				nullptr,
+				0,
+				0);
 		}
 	}
 }
@@ -2779,53 +3082,88 @@ inline void AppendTexturedMeshTris(
 		height);
 
 	constexpr std::uint32_t kUnusedFlat = 0xFFFFFFFFU;
-
-	auto emit_indexed = [&](const std::uint32_t i0, const std::uint32_t i1, const std::uint32_t i2) {
-		if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
-			return;
-		}
-		const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
-		const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
-		const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
-		detail3d::EmitIndexedClipTri(
-			screen,
-			scratch.clip_verts.data(),
-			scratch.outcodes.data(),
-			scratch.px.data(),
-			scratch.py.data(),
-			scratch.zw.data(),
-			scratch.iw.data(),
-			i0,
-			i1,
-			i2,
-			width,
-			height,
-			kUnusedFlat,
-			cull_backfaces,
-			t0[0],
-			t0[1],
-			t1[0],
-			t1[1],
-			t2[0],
-			t2[1],
-			atlas_rgba,
-			atlas_w,
-			atlas_h);
-	};
+	const detail3d::ClipVert* clip_verts = scratch.clip_verts.data();
+	const int* codes = scratch.outcodes.data();
+	const float* px = scratch.px.data();
+	const float* py = scratch.py.data();
+	const float* zw = scratch.zw.data();
+	const float* iw = scratch.iw.data();
 
 	if (index_count > 0U && indices != nullptr) {
 		const std::size_t tri_count = index_count / 3U;
 		screen.reserve(screen.size() + tri_count);
-		for (std::size_t t = 0U; t < tri_count; ++t) {
-			const std::size_t base = t * 3U;
-			emit_indexed(indices[base], indices[base + 1U], indices[base + 2U]);
-		}
+		detail3d::EmitIndexedTexturedRange(
+			screen,
+			clip_verts,
+			codes,
+			px,
+			py,
+			zw,
+			iw,
+			uvs,
+			indices,
+			0U,
+			tri_count,
+			width,
+			height,
+			kUnusedFlat,
+			cull_backfaces,
+			atlas_rgba,
+			atlas_w,
+			atlas_h);
 	} else {
 		const std::size_t tri_count = vertex_count / 3U;
 		screen.reserve(screen.size() + tri_count);
 		for (std::size_t t = 0U; t < tri_count; ++t) {
 			const std::uint32_t i0 = static_cast<std::uint32_t>(t * 3U);
-			emit_indexed(i0, i0 + 1U, i0 + 2U);
+			const std::uint32_t i1 = i0 + 1U;
+			const std::uint32_t i2 = i0 + 2U;
+			const int ca = codes[i0];
+			const int cb = codes[i1];
+			const int cc = codes[i2];
+			if ((ca & cb & cc) != 0) {
+				continue;
+			}
+			const float* t0 = uvs + static_cast<std::size_t>(i0) * 2U;
+			const float* t1 = uvs + static_cast<std::size_t>(i1) * 2U;
+			const float* t2 = uvs + static_cast<std::size_t>(i2) * 2U;
+			if ((ca | cb | cc) == 0) {
+				detail3d::TryAppendTexturedScreenTriFast(
+					screen,
+					px[i0], py[i0], zw[i0], iw[i0], t0[0], t0[1],
+					px[i1], py[i1], zw[i1], iw[i1], t1[0], t1[1],
+					px[i2], py[i2], zw[i2], iw[i2], t2[0], t2[1],
+					kUnusedFlat,
+					cull_backfaces,
+					atlas_rgba,
+					atlas_w,
+					atlas_h);
+				continue;
+			}
+			detail3d::EmitIndexedClipTri(
+				screen,
+				clip_verts,
+				codes,
+				px,
+				py,
+				zw,
+				iw,
+				i0,
+				i1,
+				i2,
+				width,
+				height,
+				kUnusedFlat,
+				cull_backfaces,
+				t0[0],
+				t0[1],
+				t1[0],
+				t1[1],
+				t2[0],
+				t2[1],
+				atlas_rgba,
+				atlas_w,
+				atlas_h);
 		}
 	}
 }
