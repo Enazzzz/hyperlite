@@ -23,7 +23,7 @@ In `cpu_tri_raster_3d.hpp` (public API unchanged):
 1. **Transform once per mesh vertex** — `TransformMeshPositions` writes clip-space + outcodes; trivial-in verts are **projected once**. Optional AVX2+FMA 8-wide AoS gather when `__AVX2__ && __FMA__` (native); scalar remainder / `HYPERLITE_MARCH=x86-64`.
 2. **Outcode clip** — `ClipTriangleHomogeneous` trivial accept/reject; mesh emit uses accept → `TryAppendScreenTri` with pre-projected attrs, reject → skip, else Sutherland–Hodgman only.
 3. **Cheaper binning** — nested `min`/`max` (no `initializer_list`); tile lists reused via thread-local scratch (`clear`, keep capacity). Still AABB → tile range only (no per-pixel work).
-4. **Scratch reuse** — `MeshDrawScratch` (clip, outcodes, screen attrs, `ScreenTri` list, bins) is process-static across `DrawMesh` / `TickMesh` / immediate tris (not `thread_local`: TLS in a non-PIC static archive fails linking the Python `.so`). No OpenMP over triangles (depth races); OpenMP remains over tiles.
+4. **Scratch reuse** — `MeshDrawScratch` (clip, outcodes, screen attrs, `ScreenTri` list, bins) is process-static across `DrawMesh` / `TickMesh` / immediate tris (not `thread_local`: TLS in a non-PIC static archive fails linking the Python `.so`). No OpenMP over triangles (depth races); OpenMP over **vertices** (transform, ≥512 verts, 64-vert chunks) and over **tiles** (fill).
 
 `RasterScreenTriTile` fill inner loop untouched.
 
@@ -41,6 +41,22 @@ Immediate also gains from outcode accept + reused screen/bin scratch (no shared-
 
 Portable `HYPERLITE_MARCH=x86-64` (no AVX2 transform): mesh flat still ~**8.1e6** on this VM — the big win is algorithm/scratch, not the gather kernel. `ctest` green on native and portable.
 
+### OpenMP vertex transform (follow-up)
+
+After transform-once, emit remained ~43% of frame; parallelizing MVP+project over disjoint 64-vert chunks (gated ≥512 verts) speeds the transform slice without touching triangle emit/clip/bin/fill.
+
+Interleaved 8 pairs vs pre-change `main` on this VM (Release headless, `HYPERLITE_MARCH=native`):
+
+| Bench | Before (tris/s) | After (tris/s) | Δ |
+|-------|-----------------|----------------|---|
+| `cpu_mesh_bench` flat | **11.07e6** | **11.45e6** | **~+3.4%** |
+| `cpu_mesh_bench` textured | **10.23e6** | **10.44e6** | **~+2.0%** |
+| `cpu_mesh_bench` occluded | **7.65e6** | **7.63e6** | **~flat** |
+| `cpu_mesh_bench` occluded-2draw | **6.28e6** | **6.32e6** | **~flat** |
+| `cpu_tri_bench` (immediate) | **10.31e6** | **10.31e6** | **~flat** |
+
+Modest flat win; indexed emit loop still dominates emit. `ctest` green native + portable.
+
 ## Experiments
 
 | Experiment | Result |
@@ -50,6 +66,7 @@ Portable `HYPERLITE_MARCH=x86-64` (no AVX2 transform): mesh flat still ~**8.1e6*
 | Process-static scratch (screen + bins) | **Shipped** (not TLS — Python `.so` link) |
 | Nested AABB min/max in bin | **Shipped** |
 | OpenMP over triangles | **Not tried** (forbidden without per-tile ownership) |
+| OpenMP over vertices (64-vert chunks, ≥512 verts) | **Shipped** — mesh flat ~+3.4%, textured ~+2% (interleaved 8 pairs); emit/index loop still serial |
 | Rewrite fill / zmm / textured gather | **Out of scope** (already lost or forbidden) |
 | CSR two-pass bin counts | **Dropped** — reused `vector` bins were enough; extra pass not needed |
 
