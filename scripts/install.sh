@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command local install for Linux (mirrors scripts/install.ps1).
+# One-command local install for Linux and macOS (mirrors scripts/install.ps1).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,6 +15,14 @@ while [[ $# -gt 0 ]]; do
 		*) echo "Unknown arg: $1" >&2; exit 1 ;;
 	esac
 done
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+	echo "[hyperlite] macOS: needs Xcode CLT + CMake. Optional: brew install libomp"
+	if ! command -v cmake >/dev/null 2>&1; then
+		echo "cmake not on PATH. Install: brew install cmake" >&2
+		exit 1
+	fi
+fi
 
 echo "[hyperlite] Using Python: $PYTHON"
 "$PYTHON" -m pip install -U pip setuptools wheel

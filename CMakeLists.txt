@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.24)
 
+# Must be set before project() so Xcode/Clang pick up the deployment target.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+	if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+		set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+	endif()
+endif()
+
 project(hyperlite_engine LANGUAGES CXX)
 
 # Keep release builds focused on runtime performance.
@@ -12,9 +19,17 @@ option(HYPERLITE_ENABLE_CUDA "Build CUDA backend when toolkit is available" ON)
 option(HYPERLITE_BUILD_BENCHMARKS "Build benchmark binaries" ON)
 option(HYPERLITE_BUILD_TESTS "Build test binaries" ON)
 option(HYPERLITE_ENABLE_X11 "Enable X11 windowed present on Linux when libs are found" ON)
+option(HYPERLITE_ENABLE_COCOA "Enable Cocoa windowed present on macOS" ON)
 set(HYPERLITE_MARCH "native" CACHE STRING "Release -march value on non-MSVC (empty disables; use x86-64 for portable)")
 set(HYPERLITE_CUDA_ENABLED OFF)
 set(HYPERLITE_HAS_X11 0)
+
+if(APPLE)
+	enable_language(OBJCXX)
+	set(CMAKE_OBJCXX_STANDARD 20)
+	set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+	set(CMAKE_OBJCXX_EXTENSIONS OFF)
+endif()
 
 if(MSVC)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -42,16 +57,29 @@ else()
 		$<$<COMPILE_LANGUAGE:CXX>:-Wall>
 		$<$<COMPILE_LANGUAGE:CXX>:-Wextra>
 		$<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+		$<$<COMPILE_LANGUAGE:OBJCXX>:-Wall>
+		$<$<COMPILE_LANGUAGE:OBJCXX>:-Wextra>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3>
 		$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-ffast-math>
+		$<$<AND:$<COMPILE_LANGUAGE:OBJCXX>,$<CONFIG:Release>>:-O3>
+		$<$<AND:$<COMPILE_LANGUAGE:OBJCXX>,$<CONFIG:Release>>:-ffast-math>
 	)
-	if(HYPERLITE_MARCH STREQUAL "")
+	# Apple Silicon cannot consume -march=x86-64 (Linux portable CI flag).
+	set(HYPERLITE_MARCH_EFFECTIVE "${HYPERLITE_MARCH}")
+	if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+		if(HYPERLITE_MARCH_EFFECTIVE STREQUAL "x86-64" OR HYPERLITE_MARCH_EFFECTIVE STREQUAL "x86_64")
+			message(STATUS "Ignoring HYPERLITE_MARCH=${HYPERLITE_MARCH} on Apple Silicon.")
+			set(HYPERLITE_MARCH_EFFECTIVE "")
+		endif()
+	endif()
+	if(HYPERLITE_MARCH_EFFECTIVE STREQUAL "")
 		message(STATUS "HYPERLITE_MARCH empty: portable scalar/SSE codegen (no -march).")
 	else()
 		add_compile_options(
-			$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-march=${HYPERLITE_MARCH}>
+			$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-march=${HYPERLITE_MARCH_EFFECTIVE}>
+			$<$<AND:$<COMPILE_LANGUAGE:OBJCXX>,$<CONFIG:Release>>:-march=${HYPERLITE_MARCH_EFFECTIVE}>
 		)
-		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH} (AVX2 / AVX-512VL opaque fill only when the arch enables those macros).")
+		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH_EFFECTIVE} (AVX2 / AVX-512VL opaque fill only when the arch enables those macros).")
 	endif()
 endif()
 
@@ -100,6 +128,25 @@ if(WIN32)
 		engine/src/platform/win32_window.cpp
 		engine/src/platform/dxgi_presenter.cpp
 	)
+elseif(APPLE)
+	if(HYPERLITE_ENABLE_COCOA)
+		list(APPEND HYPERLITE_ENGINE_SOURCES
+			engine/src/platform/macos_window.mm
+			engine/src/runtime/macos_gamepad.mm
+			engine/src/runtime/macos_audio.mm
+		)
+		set_source_files_properties(
+			engine/src/platform/macos_window.mm
+			engine/src/runtime/macos_gamepad.mm
+			engine/src/runtime/macos_audio.mm
+			PROPERTIES
+				COMPILE_FLAGS "-fobjc-arc"
+				LANGUAGE OBJCXX
+		)
+		message(STATUS "Cocoa present enabled (AppKit blit of host RGBA8; no Metal raster).")
+	else()
+		message(STATUS "HYPERLITE_ENABLE_COCOA=OFF; building headless-only present path.")
+	endif()
 else()
 	if(HYPERLITE_ENABLE_X11)
 		find_package(X11)
@@ -119,6 +166,11 @@ add_library(hyperlite_engine STATIC ${HYPERLITE_ENGINE_SOURCES})
 
 target_include_directories(hyperlite_engine PUBLIC engine/include)
 target_compile_definitions(hyperlite_engine PUBLIC HYPERLITE_HAS_X11=${HYPERLITE_HAS_X11})
+if(APPLE AND HYPERLITE_ENABLE_COCOA)
+	target_compile_definitions(hyperlite_engine PUBLIC HYPERLITE_HAS_COCOA=1)
+else()
+	target_compile_definitions(hyperlite_engine PUBLIC HYPERLITE_HAS_COCOA=0)
+endif()
 # Required so the static archive can link into the Python extension (.so / .pyd).
 set_property(TARGET hyperlite_engine PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET hyperlite_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
@@ -128,8 +180,25 @@ if(NOT MSVC)
 	if(OpenMP_CXX_FOUND)
 		target_link_libraries(hyperlite_engine PUBLIC OpenMP::OpenMP_CXX)
 	else()
-		message(WARNING "OpenMP not found; CPU line batches will not parallelize.")
+		if(APPLE)
+			message(STATUS "OpenMP not found (typical with Apple Clang). CPU line batches stay serial. Optional: brew install libomp")
+		else()
+			message(WARNING "OpenMP not found; CPU line batches will not parallelize.")
+		endif()
 	endif()
+endif()
+
+if(APPLE AND HYPERLITE_ENABLE_COCOA)
+	target_link_libraries(hyperlite_engine PUBLIC
+		"-framework Cocoa"
+		"-framework QuartzCore"
+		"-framework CoreVideo"
+		"-framework CoreGraphics"
+		"-framework GameController"
+		"-framework AudioToolbox"
+		"-framework CoreAudio"
+		"-framework ApplicationServices"
+	)
 endif()
 
 if(HYPERLITE_HAS_X11)
@@ -253,4 +322,9 @@ if(HYPERLITE_BUILD_TESTS)
 	target_link_libraries(game_runtime_tests PRIVATE hyperlite_engine)
 	set_property(TARGET game_runtime_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 	add_test(NAME game_runtime_tests COMMAND game_runtime_tests)
+
+	add_executable(platform_window_tests tests/platform_window_tests.cpp)
+	target_link_libraries(platform_window_tests PRIVATE hyperlite_engine)
+	set_property(TARGET platform_window_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	add_test(NAME platform_window_tests COMMAND platform_window_tests)
 endif()

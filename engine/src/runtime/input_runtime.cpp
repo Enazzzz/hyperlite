@@ -9,6 +9,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef __APPLE__
+#include "engine/runtime/macos_gamepad.hpp"
+#endif
+
 namespace hyperlite {
 
 void InputRuntime::BeginFrame(const InputState& snapshot, EventQueue* events) {
@@ -215,6 +219,8 @@ void InputRuntime::PollGamepads() {
 		}
 		close(fd);
 	}
+#elif defined(__APPLE__)
+	PollMacosGamepads(gamepads_.data(), kMaxGamepads);
 #else
 	(void)0;
 #endif
