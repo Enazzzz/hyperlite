@@ -14,6 +14,8 @@ Phase split on the 70×70 grid @ 1280×720 (Release headless, before this PR):
 
 Flat ≈ textured tris/s on main (~5.2–5.3e6) also pointed at transform/clip/bin, not atlas fill.
 
+Follow-up: dedicated SIMD / streaming clear for color + depth was tried and **not shipped** (~flat full-frame benches; nontemporal stores regressed heavily). See [simd-clear.md](simd-clear.md).
+
 Indexed mesh: **5 041** unique verts vs **9 800** tris → old path ran ~**29 400** `MulViewProj` + full frustum clips per draw.
 
 ## What shipped
