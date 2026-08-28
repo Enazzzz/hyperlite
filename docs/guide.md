@@ -1,6 +1,6 @@
 # Hyperlite — Complete Guide
 
-Everything you need to install, draw, handle input, pick the right backend, tune present paths, and ship a fast 2D game on Hyperlite.
+Everything you need to install, draw, handle input, pick the right backend, tune present paths, and ship a fast 2D/3D software-raster game on Hyperlite.
 
 **New here?** Read in this order:
 
@@ -8,6 +8,7 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 2. [Best practices — read this](#10-best-practices--read-this)
 3. [Wireframe & FPS games](#7-wireframe--fps-games)
 4. Run `python/examples/minimal_game.py`, then `python/examples/native_game.py`
+5. Platforms: [platforms.md](platforms.md) · macOS: [macos.md](macos.md) · native loop: [game-runtime.md](game-runtime.md)
 
 ---
 
@@ -25,7 +26,7 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 10. [Best practices — read this](#10-best-practices--read-this)
 11. [CPU vs GPU backend](#11-cpu-vs-gpu-backend)
 12. [Building a game — structure & patterns](#12-building-a-game--structure--patterns)
-13. [Full API reference](#13-full-api-reference)
+13. [Full API reference](#13-full-api-reference) (`Engine` + `Game`)
 14. [Examples](#14-examples)
 15. [Performance & profiling](#15-performance--profiling)
 16. [Troubleshooting](#16-troubleshooting)
@@ -35,13 +36,13 @@ Everything you need to install, draw, handle input, pick the right backend, tune
 
 ## 1. What Hyperlite is (and is not)
 
-Hyperlite is an **immediate-mode 2D renderer** for Python on **Windows, Linux, and macOS**:
+Hyperlite is an **immediate-mode 2D+3D software renderer** for Python on **Windows, Linux, and macOS**:
 
-- You own the game logic in plain Python.
-- Every frame, **you** queue draw operations (`clear`, `line`, `rect_fill`, `draw_sprite`, …).
-- The engine rasterizes in **painter’s order** and presents to a Win32, X11, or Cocoa window (or headless for CI).
+- You own the game logic in Python (`while engine.is_running()`), or let C++ own the loop via `Game.run()`.
+- Every frame, **you** queue draw operations (`clear`, `line`, `rect_fill`, `draw_sprite`, `draw_mesh`, …).
+- The engine rasterizes in **painter’s order** (plus depth-tested 3D) and presents to a Win32, X11, or Cocoa window (or headless for CI).
 
-Think **pygame’s surface + blit model**, stripped to the metal: the `Engine` has no scene graph. Optional C++ runtime (`Game`) adds a native loop, software mixer, bitmap text, and immediate UI — none of that is required to rasterize.
+Think **pygame’s surface + blit model**, stripped to the metal: the `Engine` has no scene graph. Optional C++ runtime (`Game`) adds a native loop, software mixer, bitmap text, and immediate UI — none of that is required to rasterize. Physics, world, Mix, UI, and nav stay **C++-only**; Python `Game` is a thin façade.
 
 ### Good for
 
@@ -516,7 +517,7 @@ engine.tick()
 
 ### 3D filled triangles (Layer 1)
 
-Immediate-mode filled triangles with the same depth / view-proj plumbing as Layer 0. Tris are binned into **64×64** tiles (matching dirty present tiles) and rasterized with half-space coverage + top-left fill rule.
+Immediate-mode filled triangles with the same depth / view-proj plumbing as Layer 0. Tris are binned into **128×128** raster tiles (`kTriRasterTileSize`) and rasterized with half-space coverage + top-left fill rule. Framebuffer **dirty present** tiles are a separate 64px grid — they do not match the triangle bins.
 
 ```python
 engine.enable_depth(True)
@@ -537,7 +538,7 @@ engine.tris_screen(screen_tris, 255, 80, 80, 255)
 
 ### 3D retained meshes (Layer 2)
 
-Load once, draw many times with a model matrix (like `load_atlas` + `draw_sprite`). Reuses the Layer 1 tiled raster; UVs are stored but texturing is deferred.
+Load once, draw many times with a model matrix (like `load_atlas` + `draw_sprite`). Reuses the Layer 1 tiled raster. Flat `draw_mesh` ignores UVs; `draw_mesh_textured` samples a `load_atlas` (nearest, clamp, UV 0..1 over the full atlas). Batch with `draw_mesh_many` / `draw_mesh_textured_many`.
 
 ```python
 # verts: float32 x6 per vert (x,y,z,u,v,_pad); indices: uint32 tris (or None)
@@ -550,7 +551,7 @@ engine.tick()
 ```
 
 - Honors `enable_depth` and `set_cull_backfaces` (same as world `tris_3d`).
-- Flat color only in v1 — see [3d-meshes.md](3d-meshes.md). Benches: [3d-mesh-bench.md](3d-mesh-bench.md).
+- Texturing: [3d-meshes.md](3d-meshes.md). Instancing: [mesh-instances.md](mesh-instances.md). Benches: [3d-mesh-bench.md](3d-mesh-bench.md).
 
 ### Mixed frames (wireframe + HUD + sprites)
 
@@ -1014,7 +1015,7 @@ On the same hardware, Hyperlite **wins** when used as designed:
 | 1000× sprite blits | ~1,900 FPS (CPU) | ~635 FPS |
 | 50k wireframe lines 1280×720 | ~30–60+ FPS (CPU tick_lines) | Not comparable |
 
-pygame still wins on **ecosystem** (fonts, mixer, transforms, cross-platform) — not raw throughput for these paths.
+pygame still wins on **ecosystem** (Python fonts, OS audio on Linux/Windows, community). Hyperlite is also Windows/Linux/macOS; C++ `Game` has a software mixer, bitmap font, and UI, but those are not exported to Python.
 
 ### Migrating from pygame
 
@@ -1039,14 +1040,14 @@ print(engine.backend_name())  # "gpu" or "cpu" if GPU init failed
 
 ### CPU backend (`"cpu"`)
 
-- Rasterizes directly into host framebuffer (SIMD alpha, OpenMP line batches).
+- Rasterizes directly into host framebuffer (SIMD alpha, OpenMP line batches; scalar on Apple Silicon).
 - **No readback tax** — pixels are already on CPU.
-- Present via persistent DIB + BitBlt (+ optional async double-buffer).
-- **Default choice** for vector games, wireframe, sprite games at 720p–1080p.
+- Present copies that RGBA8 buffer: DXGI (default) or GDI on Windows, X11 MIT-SHM on Linux, Cocoa layer blit on macOS. Optional CPU double-buffer / dirty 64px tiles.
+- **Default choice** for vector games, wireframe, filled tris, meshes, and sprite games at 720p–1080p.
 
 ### GPU backend (`"gpu"`)
 
-- Commands execute on CUDA device; default `present()` readbacks to CPU then GDI blits.
+- Commands execute on a CUDA device (**Windows/Linux only**; macOS always CPU). Default `present()` readbacks to CPU then blits.
 - **Wins** when GPU work dominates: full-frame upload, batched atlas blits, spiro scenes, `tick_lines_gpu`.
 - **Loses** for small vector-only scenes due to readback + present overhead.
 
@@ -1153,6 +1154,29 @@ hyperlite.Engine(width, height, backend="cpu", title="Hyperlite", present="auto"
 
 Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 
+### Game (optional native loop)
+
+```python
+hyperlite.Game(width, height, backend="cpu", title="Hyperlite", present="auto")
+```
+
+Same constructor args as `Engine`. C++ owns poll / systems / present. Python is a thin façade — see [game-runtime.md](game-runtime.md).
+
+| Method | Role |
+|--------|------|
+| `run()` / `step()` / `request_quit()` | Native loop (GIL released in `run`) |
+| `set_target_fps` / `set_max_frames` / `set_clear_color` | Pacing and auto-clear |
+| `on_frame(fn)` | Optional Python hook (HUD / simple movers) |
+| `engine()` | Borrowed `Engine` (does not own the native engine) |
+| `key_down` / `key_pressed` / `key_released` | Held + edges |
+| `map_action` / `action_down` | Named key bindings |
+| `create_entity` / `destroy_entity` | Handle table |
+| `draw_mesh_instances` | Batch mesh draw (float32 N×16 models) |
+| `start_audio_output` / `stop_audio_output` | Core Audio on macOS; no-op elsewhere |
+| `profiler_ms()` / `delta_time()` / `frame_index()` | Native timings |
+
+Physics, world, Mix, UI, nav, jobs, and the CPU shader VM are **C++-only**.
+
 ### Frame lifecycle
 
 | Method | Returns | Description |
@@ -1202,6 +1226,10 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `load_mesh(verts, indices=None)` | → int handle (float32×6/vert; uint32 indices optional) |
 | `draw_mesh(mesh, model16, r, g, b, a=255)` | Draw retained mesh with column-major model |
 | `tick_mesh(mesh, model16, cr..ca, r..a)` | Poll + clear + draw_mesh + present |
+| `draw_mesh_many(mesh, models, r, g, b, a=255)` | One mesh, many column-major 4×4 models (float32 N×16) |
+| `draw_mesh_textured(mesh, model16, atlas)` | Retained mesh, nearest/clamp atlas (UV 0..1 full sheet) |
+| `draw_mesh_textured_many(mesh, models, atlas)` | Instanced textured draw |
+| `tick_mesh_textured(mesh, model16, atlas, cr..ca)` | Poll + clear + textured mesh + present |
 | `tick_gpu_spiro(...)` | Poll + GPU spiro scene + present |
 
 ### Sprites & layers
@@ -1221,6 +1249,7 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 - `world_segs` / 3D screen segs: **6 × float32 per line** — `(x0,y0,z0, x1,y1,z1)`
 - `world` / screen tris: **9 × float32 per triangle** — `(x0,y0,z0, x1,y1,z1, x2,y2,z2)`
 - mesh verts: **6 × float32 per vertex** — `(x,y,z,u,v,_pad)`; indices: **uint32** (3 per tri)
+- mesh instance models: **16 × float32 per instance** — column-major 4×4 (`draw_mesh_many` / `draw_mesh_textured_many`)
 
 ### Advanced / introspection
 
@@ -1237,9 +1266,11 @@ Env overrides: `HYPERLITE_HEADLESS=1`, `HYPERLITE_PRESENT=headless|window`.
 | `set_blit_sort_threshold(n)` | Material sort cutoff (0=off, default 256) |
 | `set_line_sort_threshold(n)` | Line color/width sort cutoff (0=off, default 64) |
 | `set_command_buffer_reserve(n)` | Pre-reserve command capacity (default 65536) |
-| `set_vsync(enabled)` | Vertical sync — DwmFlush (CPU) / sync interval (DXGI) |
+| `set_vsync(enabled)` | Vertical sync — DwmFlush / CVDisplayLink (CPU) / DXGI interval (GPU) |
 | `vsync_enabled()` | bool |
-| `set_direct_present(enabled)` | GPU DXGI present, no CPU readback |
+| `set_dxgi_present(enabled)` | Windows DXGI flip-model (default on); GDI fallback if off/failed |
+| `dxgi_present_enabled()` | bool |
+| `set_direct_present(enabled)` | GPU DXGI present, no CPU readback (Windows CUDA) |
 | `set_pipelined(enabled)` | Double-buffered present (CPU async GDI or GPU pipelined readback) |
 | `set_double_buffered_present(enabled)` | Alias for `set_pipelined` |
 | `set_dirty_present(enabled)` | CPU partial present for dirty 64px tiles |
@@ -1325,6 +1356,7 @@ raster_ms, present_ms = engine.wireframe_timings()
 
 ```powershell
 python python\examples\minimal_game.py
+python python\examples\native_game.py
 python python\examples\wireframe_demo.py
 python python\examples\window_input_test.py
 python python\examples\software_raster_demo.py --fill numpy

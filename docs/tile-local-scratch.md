@@ -1,6 +1,8 @@
 # Tile-local scratch fill (investigation — not shipped)
 
-Follow-up to [simd-tri-fill.md](simd-tri-fill.md) and [simd-clear.md](simd-clear.md). Hypothesis: rasterizing each 64×64 OpenMP tile into a **thread-local contiguous scratch** (RGBA8 + float32 depth, pitch = tile width) instead of strided global `y*width+x` accesses, then writing the tile back, would cut fill bandwidth on dense meshes.
+Follow-up to [simd-tri-fill.md](simd-tri-fill.md) and [simd-clear.md](simd-clear.md). Hypothesis: rasterizing each OpenMP tile into a **thread-local contiguous scratch** (RGBA8 + float32 depth, pitch = tile width) instead of strided global `y*width+x` accesses, then writing the tile back, would cut fill bandwidth on dense meshes.
+
+> **Current production:** raster tiles are **128×128**. This investigation used **64×64** scratch buffers and was **not merged**.
 
 **Outcome:** Correctness fixable, but paired benches regressed **~17–36%** on this VM. Engine code **not merged**; keep direct global fill.
 

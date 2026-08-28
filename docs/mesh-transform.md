@@ -1,6 +1,8 @@
 # Mesh transform / clip / bin (Layer 2 hot path)
 
-Follow-up to [simd-tri-fill.md](simd-tri-fill.md): after AVX2 / AVX-512VL fill, `cpu_mesh_bench` stayed nearly flat because time moved **upstream** of `RasterScreenTriTile`. This change speeds retained meshes by optimizing MVP transform, homogeneous clip, and 64×64 binning — **not** the pixel fill. Hyperlite still owns all pixels (no Vulkan/GL/D3D/Metal).
+Follow-up to [simd-tri-fill.md](simd-tri-fill.md): after AVX2 / AVX-512VL fill, `cpu_mesh_bench` stayed nearly flat because time moved **upstream** of `RasterScreenTriTile`. This change speeds retained meshes by optimizing MVP transform, homogeneous clip, and tiled binning — **not** the pixel fill. Hyperlite still owns all pixels (no Vulkan/GL/D3D/Metal).
+
+> **Current production:** raster tiles are **128×128**. Phase-split rows that say 64×64 binning are from this experiment.
 
 ## Investigation (this VM)
 

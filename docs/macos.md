@@ -7,7 +7,7 @@ Hyperlite is a **CPU software renderer**. On macOS it still owns every pixel: Co
 | Area | macOS behavior |
 |------|----------------|
 | Window / present | `NSWindow` + layer-backed `NSView`. Host RGBA8 is converted to BGRA and assigned to `CALayer.contents` (nearest-neighbor, stretched — including Retina). |
-| Input | `NSEvent` polled into the same Win32 VK map used on Windows and X11 (`Keys.Escape`, WASD, arrows, F11, …). |
+| Input | `NSEvent` polled into the same Win32 VK map used on Windows and X11 (`Keys.Escape`, WASD, arrows, Space, F11, Return). |
 | Mouse capture | Cursor hidden; `CGAssociateMouseAndMouseCursorPosition(false)` + warp to center. |
 | Fullscreen | `NSWindow toggleFullScreen:` |
 | Vsync | `CVDisplayLink` wait on `Present` when enabled |

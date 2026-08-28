@@ -1,8 +1,20 @@
 # Hyperlite
 
-Super lightweight immediate-mode renderer for Python — like pygame, but you draw every pixel (or line, or rect) yourself, and the engine stays out of your way.
+Super lightweight immediate-mode **2D+3D software renderer** for Python — like pygame, but you draw every pixel (or line, or mesh) yourself, and the engine stays out of your way.
 
 **Windows, Linux & macOS** · **CPU software raster** (CUDA GPU backend on Windows/Linux) · **Not on PyPI** (local install only)
+
+## Status
+
+Alpha **0.1.0**. Ready for external Python 2D/3D **software-raster** games on Windows, Linux, and macOS, with honest v1 limits:
+
+- Hyperlite **owns every pixel** — OS APIs (GDI, DXGI, X11, Cocoa) present/input only. No Vulkan / OpenGL / D3D / Metal raster.
+- CUDA `"gpu"` is Windows/Linux only. Apple Silicon uses the scalar CPU raster.
+- Windows gamepad is a stub. Linux/Windows audio is Mix-to-buffer (no OS device). macOS Core Audio starts from `Game.run()`.
+- Python `Game` is a thin façade. Physics, world, Mix, UI, nav, jobs, and the CPU shader VM stay **C++-only**.
+- Public Python API is **additive only** — existing `Engine` methods stay.
+
+Platform matrix: [docs/platforms.md](docs/platforms.md). Native loop: [docs/game-runtime.md](docs/game-runtime.md).
 
 ## Quick start
 
@@ -106,8 +118,10 @@ Override with `present="headless"` / env `HYPERLITE_HEADLESS=1` / `HYPERLITE_PRE
 | `python/examples/` | Demos and benchmarks |
 | `docs/guide.md` | **How-to guide** |
 | `docs/platforms.md` | Supported OS / present / input / audio |
+| `docs/macos.md` | Cocoa present, GameController, Core Audio |
+| `docs/game-runtime.md` | Optional native `Game.run()` |
 | `docs/linux-bench.md` | Linux baseline numbers |
-| `docs/3d-plan.md` | 3D layer roadmap (wireframe → tris → mesh → GPU) |
+| `docs/3d-plan.md` | 3D layer roadmap (wireframe → tris → mesh) |
 | `scripts/install.ps1` / `install.sh` | One-command local install |
 
 ## License

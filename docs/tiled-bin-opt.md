@@ -1,5 +1,7 @@
 # 64×64 tile binning / vertex Hi-Z micro-opts
 
+> **Current production:** triangle/mesh raster tiles are **128×128** (`kTriRasterTileSize`). Dirty present tiles remain **64px**. This page records an experiment that used 64×64 raster tiles.
+
 Follow-up to [hiz-tile-depth.md](hiz-tile-depth.md) and [mesh-transform.md](mesh-transform.md). Goal: speed `RasterScreenTrisTiled` binning and/or cheaper vertex Hi-Z without a second raster pass or public API changes.
 
 ## What shipped (PR #24)

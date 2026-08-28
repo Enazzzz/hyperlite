@@ -2,6 +2,8 @@
 
 Measured on the Hyperlite Linux cloud VM (same class as [linux-bench.md](linux-bench.md) / [cloud-agent-vm-specs.md](cloud-agent-vm-specs.md)). Numbers are real wall-clock results from Release builds — not estimates.
 
+3D **line** raster still bins with framebuffer dirty tiles (**64px**). Triangle/mesh fill uses a separate **128×128** grid — see [3d-plan.md](3d-plan.md).
+
 ## Machine
 
 | Item | Value |

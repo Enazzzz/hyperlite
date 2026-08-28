@@ -2,6 +2,8 @@
 
 Measured on the Hyperlite Linux cloud VM (same class as [linux-bench.md](linux-bench.md) / [3d-wireframe-bench.md](3d-wireframe-bench.md)). Numbers are real wall-clock results from Release builds — not estimates.
 
+> **Current production:** triangle raster tiles are **128×128**. The OpenMP / machine notes below describe the **64×64** bins used when these numbers were taken. See [3d-plan.md](3d-plan.md).
+
 ## Machine
 
 | Item | Value |

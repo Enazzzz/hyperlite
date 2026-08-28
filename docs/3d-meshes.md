@@ -55,6 +55,7 @@ Flat-color `draw_mesh` ignores UVs and remains unchanged.
 | Flat color per draw | Shipped |
 | UV storage | Shipped |
 | `draw_mesh_textured` / `tick_mesh_textured` | **Shipped (Layer 2.1)** |
+| `draw_mesh_many` / `draw_mesh_textured_many` | **Shipped** — see [mesh-instances.md](mesh-instances.md) |
 | glTF / scene graph / PBR | Out of scope |
 
 ## Mental model
@@ -69,5 +70,6 @@ Flat-color `draw_mesh` ignores UVs and remains unchanged.
 ## See also
 
 - [3d-plan.md](3d-plan.md) — roadmap
+- [mesh-instances.md](mesh-instances.md) — `draw_mesh_many` / `draw_mesh_textured_many`
 - [3d-mesh-bench.md](3d-mesh-bench.md) — throughput vs immediate `tris_3d` / textured
 - [3d-tri-bench.md](3d-tri-bench.md) — Layer 1 immediate triangles

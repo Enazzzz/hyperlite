@@ -3,6 +3,8 @@
 NULLLIGHT-style wireframe FPS needs project + clip + depth-tested lines first — not a scene graph.
 This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 
+**Current tiling (do not confuse with old bench logs):** triangle and mesh fill bins are **128×128** (`kTriRasterTileSize`). Framebuffer dirty present tiles remain **64px** (`FrameBuffer::kDirtyTileSize`). 3D **line** raster still uses the 64px dirty-tile row strips.
+
 ## Layer 0 — Depth-tested wireframe (shipped)
 
 - Separate float32 world-space segment buffers (`x0,y0,z0,x1,y1,z1`), not Z on 2D `DrawCommand`
@@ -20,7 +22,7 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 
 - Immediate / bulk filled triangles (`tris_3d` / `tris_screen` / `tick_tris_3d`); no retained mesh yet
 - Half-space / barycentric coverage with **top-left** fill rule (shared edges: no double-write, no holes)
-- Bin into **64×64** tiles (same as framebuffer dirty tiles); OpenMP over tiles when available (each tile owns pixels → no depth races)
+- Bin into **128×128** raster tiles (`kTriRasterTileSize`); OpenMP over tiles when available (each tile owns pixels → no depth races). Framebuffer dirty **present** tiles stay **64px** — they are a different grid.
 - Flat color per triangle; opaque (`a=255`) is the fast path (depth test + write)
 - Translucent: src-over blend, **depth test only — no depth write**
 - World path: Sutherland–Hodgman clip in homogeneous clip space (±w, near mandatory); clipped ngon fans back to tris
@@ -33,12 +35,13 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 - `load_mesh` / `draw_mesh` / `tick_mesh` — CPU-resident MeshStore (AtlasStore pattern)
 - Vertex layout v1: **6 float32/vert** — `x, y, z, u, v, _pad`; indices `uint32` (optional triangle list)
 - Draw: `MVP = view_proj * model`, then existing Layer 1 clip + tiled half-space raster (honors depth + `set_cull_backfaces`)
+- Instancing: `draw_mesh_many` / `draw_mesh_textured_many` (one mesh, N column-major models, one raster)
 - Immediate `tris_3d` unchanged for dynamic geometry
 - See [3d-meshes.md](3d-meshes.md) and [3d-mesh-bench.md](3d-mesh-bench.md)
 
 ## Layer 2.1 — Textured retained meshes (shipped)
 
-- `draw_mesh_textured(mesh, model, atlas)` / optional `tick_mesh_textured` — same mesh layout, samples `load_atlas` RGBA
+- `draw_mesh_textured(mesh, model, atlas)` / `draw_mesh_textured_many` / optional `tick_mesh_textured` — same mesh layout, samples `load_atlas` RGBA
 - Perspective-correct UV during the **existing** tiled half-space fill (`u/w`, `v/w`, `1/w`); no second rasterizer
 - UV **0..1 over the full atlas** (not a sprite subrect); **clamp**; **nearest** sample (v1 fast path)
 - Alpha: `a==255` opaque + depth write; `a<255` src-over + no depth write; `a==0` skip pixel (same Layer 1 rule)
@@ -47,7 +50,7 @@ This document locks the four-layer roadmap. **Layers 0–2.1 are shipped.**
 
 ## Further speed (not a second renderer)
 
-Hyperlite’s renderer **owns all pixels**. Present is a **copy** of our RGBA8 (+ depth) into the window via the existing blit path (DXGI / X11 / GDI) — not a second rasterizer.
+Hyperlite’s renderer **owns all pixels**. Present is a **copy** of our RGBA8 (+ depth) into the window via the existing blit path (DXGI / GDI on Windows, X11 on Linux, Cocoa on macOS) — not a second rasterizer.
 
 Further speedups stay inside that ownership model:
 
@@ -62,7 +65,7 @@ Further speedups stay inside that ownership model:
 - glTF loader
 - PBR / material system
 - Custom shader language
-- Skeletal animation
+- Skeletal animation as an **Engine / Python** feature (C++ `Game` has `Animator`; it is not bound to Python)
 - Vulkan / OpenGL / D3D / Metal (or any graphics API that replaces our raster)
 
 ## API sketch (Python)
@@ -82,11 +85,13 @@ engine.tris_screen(screen_tris, r, g, b, a=255)
 # Retained mesh (Layer 2): load once, draw with model matrix
 mesh = engine.load_mesh(verts_xyz_uv_pad, indices_uint32)
 engine.draw_mesh(mesh, model16, r, g, b, a=255)
+engine.draw_mesh_many(mesh, models_n16, r, g, b, a=255)
 engine.tick_mesh(mesh, model16, cr, cg, cb, ca, r, g, b, a=255)
 
 # Textured retained mesh (Layer 2.1)
 atlas = engine.load_atlas(rgba, w, h)
 engine.draw_mesh_textured(mesh, model16, atlas)
+engine.draw_mesh_textured_many(mesh, models_n16, atlas)
 engine.tick_mesh_textured(mesh, model16, atlas, cr, cg, cb, ca)
 
 # Fused world-space wireframe (Layer 0)

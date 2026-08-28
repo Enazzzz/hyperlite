@@ -2,6 +2,8 @@
 
 Upgrade of the existing tiled half-space fill in `cpu_tri_raster_3d.hpp` — **not** a second rasterizer. Present remains a blit of Hyperlite’s RGBA8 buffer. No graphics API.
 
+> **Current production:** raster tiles are **128×128**. Hi-Z / fill notes below that say 64×64 describe the tile size when this work shipped.
+
 ## What shipped
 
 Inside `RasterScreenTriTile` (shared by immediate tris, flat mesh, textured mesh):

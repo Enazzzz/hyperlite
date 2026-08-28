@@ -10,7 +10,7 @@ Hyperlite is a **CPU software renderer**. It owns every pixel. OS graphics APIs 
 | CUDA raster (`backend="gpu"`) | Optional toolkit | Optional toolkit | No |
 | Windowed present | Win32 + DXGI (GDI fallback) | X11 + MIT-SHM | Cocoa layer blit of host RGBA8 |
 | Headless present | Yes | Yes | Yes |
-| Keyboard / mouse | Win32 | X11 | NSEvent (same VK map: Escape, Tab, WASD, F11, Return) |
+| Keyboard / mouse | Win32 | X11 | NSEvent (same VK map: Escape, Tab, WASD, arrows, Space, F11, Return) |
 | Gamepad (`InputRuntime`) | Stub (`connected=false`) | `/dev/input/js*` | GameController.framework |
 | Audio device | Mix-to-buffer only | Mix-to-buffer only | Core Audio `AudioQueue` (started by `Game.run()`) |
 | OpenMP line batches | MSVC `/openmp` | `libomp-dev` | Optional Homebrew `libomp` (Apple Clang usually has none) |
@@ -74,3 +74,13 @@ The public Python module exports **`Engine`**, **`Game`**, **`Keys`**, **`MouseB
 - **`Game`** is a thinner Python façade over the native runtime: `run()` / `step()`, input edges, optional `on_frame`, borrowed `engine()`, entity handles, instance draw, profiler. Physics, world, audio Mix, UI, nav, and jobs stay **C++-only** (`engine/include/engine/runtime/`).
 
 That split is intentional: Python is not required on the hot path. See [game-runtime.md](game-runtime.md).
+
+## v1 limits (honest)
+
+This is **alpha 0.1.0**, local install, not a Unity/Godot substitute.
+
+- Raster is CPU software (optional CUDA compute on Windows/Linux). Apple Silicon is scalar.
+- Windows `InputRuntime` gamepad: stub (`connected=false`).
+- Linux/Windows: software Mix only — no OS audio device. macOS: Core Audio via `Game.run()`.
+- Python does not bind physics, world, UI, nav, jobs, or the CPU shader VM.
+- Triangle/mesh fill tiles are **128×128**; dirty present tiles are **64px**.
