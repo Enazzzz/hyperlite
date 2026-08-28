@@ -98,7 +98,27 @@ Two-draw tri bench: clear + occluder `Tris3d`, then back-field `Tris3d` without 
 
 ### Tile AABB depth probe before edge setup — **not shipped**
 
-See [depth-prepass.md §4](depth-prepass.md#4-tile-aabb-depth-probe-before-half-space-setup--reverted-no-win): corner-min z/w probe (and tile-loop skip) before `MakeHalfEdge` / SIMD constants. Paired runs on this VM were ~noise — vertex Hi-Z already rejects the standard occluded back-field; probe overhead dominates when it rarely fires.
+See [depth-prepass.md §4](depth-prepass.md#4-tile-aabb-depth-probe-before-half-space-setup--reverted-no-win): corner-min z/w probe (and tile-loop skip) before `MakeHalfEdge` / SIMD constants. Paired runs on this VM were ~noise — vertex Hi-Z already rejects the standard occluder back-field; probe overhead dominates when it rarely fires.
+
+### Bin-time persist Hi-Z skip — **not shipped**
+
+**Idea:** In `RasterScreenTrisTiled`, when `tile_max_depth` already has tight occluders from a prior draw in the same Hi-Z epoch, skip `push_back` into tile bins if `TriTileDepthRejectMin` would reject at fill time. Optional whole-tri skip when `tri_min` is behind the max `tile_max` over the tri’s tile AABB.
+
+**Why it lost:** Fill-time `TriTileDepthReject` already skips the pixel loop cheaply (one float compare per tile-list entry). Bin-time skip adds a per-tri AABB `tile_max` scan (and often reuses or computes `tri_min`) on the persist path without removing enough bin/fill work. Primary metric regressed; open/mesh paths also noisy-to-negative.
+
+Paired interleaved before/after on this VM (Release, `-march=native`, OpenMP, headless, 8 pairs + 16 extra pairs on primary).
+
+| Bench | Before (tris/s) | After (bin-time skip) | Δ |
+|-------|-----------------|------------------------|---|
+| `cpu_tri_bench` | **8.93e6** | **8.98e6** | **~noise (+0.5%)** |
+| `cpu_tri_bench occluded` | **4.28e6** | **4.37e6** | **~noise (+2.1%)** |
+| `cpu_tri_bench occluded-2draw` | **4.09e6** | **3.95e6** | **~−3.5%** (8 pairs); **~−8.8%** (16 extra pairs) |
+| `cpu_mesh_bench` flat | **8.80e6** | **8.19e6** | **~−6.9%** |
+| `cpu_mesh_bench` textured | **5.94e6** | **5.73e6** | **~−3.6%** |
+| `cpu_mesh_bench` occluded | **4.59e6** | **4.54e6** | **~noise (−1.1%)** |
+| `cpu_mesh_bench occluded-2draw` | **4.44e6** | **4.54e6** | **~noise (+2.3%)** |
+
+**Do not retry** without a profile showing bin push + tile-list walks dominate over `tri_min` + AABB `tile_max` scans on the persist path.
 
 ## Reproduce
 

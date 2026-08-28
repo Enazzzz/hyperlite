@@ -77,6 +77,7 @@ Release, headless, `HYPERLITE_ENABLE_CUDA=OFF`, `HYPERLITE_MARCH=native`, OpenMP
 | **SIMD `ScanTileMaxDepth` alone** (AVX2 8-wide) | Helps only if rescans remain; write-track removes the hot-path caller. Kept for tests / fallback. |
 | **Fixed-point / subpixel edge functions** | **Not shipped** (same rationale as AVX2 PR). |
 | **OpenMP over triangles** | Still **forbidden** (depth races). Tiles own pixels. |
+| **Bin-time persist Hi-Z skip** before tile bin `push_back` | **Loss** on `occluded-2draw` / mesh flat — see [hiz-tile-depth.md](hiz-tile-depth.md). **Do not retry**. |
 | **SIMD / streaming color + depth clear** | **Not shipped** — noise on cacheable SIMD; large loss with `MOVNT*` before immediate raster read. See [simd-clear.md](simd-clear.md). |
 | **ScreenTri by-value tile fill + compact layout** (post-#29) | **Not shipped** — `RasterScreenTriTile` took ~96B `ScreenTri` by value per tile visit; tried `const ScreenTri&` + `ScreenTriFillGeom` local winding view, geometry-first struct (flat skips UV/atlas reads), and flat fast emit without `iw` writes. Interleaved 8 pairs vs `a4b50bc` on this VM: headline benches **±0–8%** run-to-run (e.g. mesh flat **−15%…+8%**, textured **−8%…+6%**, immediate **~flat**); no stable win. **Do not retry** by-value copy or layout-only splits without profiler proof fill is memcpy-bound. Details: [mesh-transform.md](mesh-transform.md#screentri-compact-fill-post-29). |
 

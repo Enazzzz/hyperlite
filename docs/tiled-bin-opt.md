@@ -31,6 +31,7 @@ Open stays within noise; gains are modest.
 | **`active_tiles` OpenMP list** | ~noise / slight loss — 240 tiles is already small. |
 | **`FloorDivTile` (`>> 6`)** | ~noise when paired; not shipped. |
 | **Bin `reserve` hint from `tris/tiles`** | No measurable win. |
+| **Bin-time persist Hi-Z skip** (`TriTileDepthRejectMin` before bin `push_back`) | **Loss ~−4…−9%** on `cpu_tri_bench occluded-2draw`; **~−7%** mesh flat — per-tri AABB `tile_max` scan + `tri_min` on persist path; fill-time reject already cheap. See [hiz-tile-depth.md § Bin-time persist Hi-Z skip](hiz-tile-depth.md#bin-time-persist-hi-z-skip--not-shipped). **Do not retry** without hot-sample proof bin is memcpy-/push-bound. |
 
 Also see main’s shipped Hi-Z follow-ups: write-track (#19), front-to-back sort (#20), span reject (#21), persist-until-clear (#22).
 
