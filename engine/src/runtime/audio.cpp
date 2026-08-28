@@ -1,11 +1,19 @@
 #include "engine/runtime/audio.hpp"
 
+#ifdef __APPLE__
+#include "engine/runtime/macos_audio.hpp"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
 namespace hyperlite {
+
+AudioSystem::~AudioSystem() {
+	StopOutput();
+}
 
 int AudioSystem::LoadWav(const char* path) {
 	if (path == nullptr) {
@@ -75,6 +83,7 @@ int AudioSystem::LoadWav(const char* path) {
 	clip.sample_rate = static_cast<int>(sample_rate);
 	clip.channels = static_cast<int>(channels);
 	clip.path = path;
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	clips_.push_back(std::move(clip));
 	return static_cast<int>(clips_.size()) - 1;
 }
@@ -91,11 +100,13 @@ int AudioSystem::CreateClip(
 	clip.samples.assign(samples, samples + count);
 	clip.sample_rate = sample_rate;
 	clip.channels = std::max(1, channels);
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	clips_.push_back(std::move(clip));
 	return static_cast<int>(clips_.size()) - 1;
 }
 
 const AudioClip* AudioSystem::GetClip(const int id) const {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	if (id < 0 || static_cast<std::size_t>(id) >= clips_.size()) {
 		return nullptr;
 	}
@@ -103,7 +114,8 @@ const AudioClip* AudioSystem::GetClip(const int id) const {
 }
 
 int AudioSystem::Play(const int clip_id, const float volume, const bool loop) {
-	if (GetClip(clip_id) == nullptr) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
+	if (clip_id < 0 || static_cast<std::size_t>(clip_id) >= clips_.size()) {
 		return -1;
 	}
 	AudioChannel ch{};
@@ -118,37 +130,45 @@ int AudioSystem::Play(const int clip_id, const float volume, const bool loop) {
 int AudioSystem::PlaySpatial(const int clip_id, const Vec3 position, const float volume, const bool loop) {
 	const int id = Play(clip_id, volume, loop);
 	if (id >= 0) {
-		channels_[static_cast<std::size_t>(id)].spatial = true;
-		channels_[static_cast<std::size_t>(id)].position = position;
+		std::lock_guard<std::mutex> lock(mix_mutex_);
+		if (static_cast<std::size_t>(id) < channels_.size()) {
+			channels_[static_cast<std::size_t>(id)].spatial = true;
+			channels_[static_cast<std::size_t>(id)].position = position;
+		}
 	}
 	return id;
 }
 
 void AudioSystem::Stop(const int channel) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	if (channel >= 0 && static_cast<std::size_t>(channel) < channels_.size()) {
 		channels_[static_cast<std::size_t>(channel)].playing = false;
 	}
 }
 
 void AudioSystem::SetVolume(const int channel, const float volume) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	if (channel >= 0 && static_cast<std::size_t>(channel) < channels_.size()) {
 		channels_[static_cast<std::size_t>(channel)].volume = volume;
 	}
 }
 
 void AudioSystem::SetLoop(const int channel, const bool loop) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	if (channel >= 0 && static_cast<std::size_t>(channel) < channels_.size()) {
 		channels_[static_cast<std::size_t>(channel)].loop = loop;
 	}
 }
 
 void AudioSystem::SetListener(const Vec3 position, const Vec3 forward, const Vec3 up) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	listener_pos_ = position;
 	listener_fwd_ = Normalize(forward);
 	listener_up_ = Normalize(up);
 }
 
 int AudioSystem::PlayingCount() const {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
 	int n = 0;
 	for (const auto& c : channels_) {
 		if (c.playing) {
@@ -158,7 +178,49 @@ int AudioSystem::PlayingCount() const {
 	return n;
 }
 
+bool AudioSystem::StartOutput() {
+#ifdef __APPLE__
+	{
+		std::lock_guard<std::mutex> lock(mix_mutex_);
+		if (output_running_) {
+			return true;
+		}
+	}
+	// Do not hold mix_mutex_ here: the AudioQueue callback calls Mix() immediately.
+	const bool ok = StartMacosAudioOutput(this);
+	std::lock_guard<std::mutex> lock(mix_mutex_);
+	output_running_ = ok;
+	return ok;
+#else
+	return false;
+#endif
+}
+
+void AudioSystem::StopOutput() {
+#ifdef __APPLE__
+	StopMacosAudioOutput();
+	std::lock_guard<std::mutex> lock(mix_mutex_);
+	output_running_ = false;
+#else
+	output_running_ = false;
+#endif
+}
+
+bool AudioSystem::OutputRunning() const {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
+#ifdef __APPLE__
+	return output_running_ && MacosAudioOutputRunning();
+#else
+	return false;
+#endif
+}
+
 void AudioSystem::Mix(std::int16_t* out, const int frames) {
+	std::lock_guard<std::mutex> lock(mix_mutex_);
+	MixLocked(out, frames);
+}
+
+void AudioSystem::MixLocked(std::int16_t* out, const int frames) {
 	if (out == nullptr || frames <= 0) {
 		return;
 	}
@@ -167,8 +229,12 @@ void AudioSystem::Mix(std::int16_t* out, const int frames) {
 		if (!ch.playing) {
 			continue;
 		}
-		const AudioClip* clip = GetClip(ch.clip);
-		if (clip == nullptr || clip->samples.empty()) {
+		if (ch.clip < 0 || static_cast<std::size_t>(ch.clip) >= clips_.size()) {
+			ch.playing = false;
+			continue;
+		}
+		const AudioClip* clip = &clips_[static_cast<std::size_t>(ch.clip)];
+		if (clip->samples.empty()) {
 			ch.playing = false;
 			continue;
 		}

@@ -59,3 +59,15 @@ game.Run();
 ## Example
 
 `python/examples/native_game.py`
+
+## Platforms
+
+`Game.run()` is the same on Windows, Linux, and macOS. Platform-specific pieces:
+
+| Piece | Windows | Linux | macOS |
+|-------|---------|-------|--------|
+| Window | Win32 + GDI/DXGI | X11 MIT-SHM | Cocoa layer blit |
+| Gamepad | stub | `/dev/input/js*` | GameController.framework |
+| Audio device | Mix-only | Mix-only | Core Audio (`AudioQueue`); `run()` starts it |
+
+Hyperlite still owns pixels on every OS. See [macos.md](macos.md).

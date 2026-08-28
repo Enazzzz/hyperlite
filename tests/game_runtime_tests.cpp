@@ -268,6 +268,10 @@ int main() {
 		std::int16_t mix[32]{};
 		audio.Mix(mix, 16);
 		Expect(audio.PlayingCount() >= 0, "audio mix");
+#ifndef __APPLE__
+		Expect(!audio.StartOutput(), "audio output is macOS-only in this branch");
+#endif
+		audio.StopOutput();
 	}
 
 	// Save / assets
