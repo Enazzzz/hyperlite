@@ -5,9 +5,11 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
 	if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 		set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 	endif()
+	# Enable OBJCXX at project() time so .mm files are not compiled as CXX.
+	project(hyperlite_engine LANGUAGES CXX OBJCXX)
+else()
+	project(hyperlite_engine LANGUAGES CXX)
 endif()
-
-project(hyperlite_engine LANGUAGES CXX)
 
 # Keep release builds focused on runtime performance.
 set(CMAKE_CXX_STANDARD 20)
@@ -25,10 +27,23 @@ set(HYPERLITE_CUDA_ENABLED OFF)
 set(HYPERLITE_HAS_X11 0)
 
 if(APPLE)
-	enable_language(OBJCXX)
+	if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+		message(FATAL_ERROR
+			"macOS builds require Apple Clang (clang++). "
+			"Homebrew GCC cannot compile the Cocoa .mm sources. Unset CXX/CC and reconfigure.")
+	endif()
 	set(CMAKE_OBJCXX_STANDARD 20)
 	set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 	set(CMAKE_OBJCXX_EXTENSIONS OFF)
+	# python.org installers are universal2. Building both slices with -march=native
+	# (or mixing arm64 host flags into x86_64) fails on Apple Silicon. Default to host.
+	if(NOT CMAKE_OSX_ARCHITECTURES)
+		if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+			set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Hyperlite host architecture (not universal)")
+		elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64")
+			set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Hyperlite host architecture (not universal)")
+		endif()
+	endif()
 endif()
 
 if(MSVC)
@@ -64,11 +79,18 @@ else()
 		$<$<AND:$<COMPILE_LANGUAGE:OBJCXX>,$<CONFIG:Release>>:-O3>
 		$<$<AND:$<COMPILE_LANGUAGE:OBJCXX>,$<CONFIG:Release>>:-ffast-math>
 	)
-	# Apple Silicon cannot consume -march=x86-64 (Linux portable CI flag).
+	# -march=native is rejected on many Apple Silicon Xcodes ("unsupported option
+	# '-march=' for target 'arm64-apple-darwin'"). Raster on ARM is scalar anyway.
 	set(HYPERLITE_MARCH_EFFECTIVE "${HYPERLITE_MARCH}")
 	if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
-		if(HYPERLITE_MARCH_EFFECTIVE STREQUAL "x86-64" OR HYPERLITE_MARCH_EFFECTIVE STREQUAL "x86_64")
-			message(STATUS "Ignoring HYPERLITE_MARCH=${HYPERLITE_MARCH} on Apple Silicon.")
+		message(STATUS "Apple Silicon: not passing -march=${HYPERLITE_MARCH} (host Clang defaults are used).")
+		set(HYPERLITE_MARCH_EFFECTIVE "")
+	endif()
+	if(NOT HYPERLITE_MARCH_EFFECTIVE STREQUAL "")
+		include(CheckCXXCompilerFlag)
+		check_cxx_compiler_flag("-march=${HYPERLITE_MARCH_EFFECTIVE}" HYPERLITE_HAVE_MARCH)
+		if(NOT HYPERLITE_HAVE_MARCH)
+			message(STATUS "Compiler rejects -march=${HYPERLITE_MARCH_EFFECTIVE}; building without it.")
 			set(HYPERLITE_MARCH_EFFECTIVE "")
 		endif()
 	endif()
@@ -82,6 +104,18 @@ else()
 		message(STATUS "HYPERLITE_MARCH=${HYPERLITE_MARCH_EFFECTIVE} (AVX2 / AVX-512VL opaque fill only when the arch enables those macros).")
 	endif()
 endif()
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT HYPERLITE_IPO_OK OUTPUT HYPERLITE_IPO_MSG)
+if(NOT HYPERLITE_IPO_OK)
+	message(STATUS "IPO/LTO not used: ${HYPERLITE_IPO_MSG}")
+endif()
+
+function(hyperlite_maybe_ipo target)
+	if(HYPERLITE_IPO_OK)
+		set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	endif()
+endfunction()
 
 set(HYPERLITE_ENGINE_SOURCES
 	engine/src/core/frame_loop.cpp
@@ -173,12 +207,37 @@ else()
 endif()
 # Required so the static archive can link into the Python extension (.so / .pyd).
 set_property(TARGET hyperlite_engine PROPERTY POSITION_INDEPENDENT_CODE ON)
-set_property(TARGET hyperlite_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+hyperlite_maybe_ipo(hyperlite_engine)
 
 if(NOT MSVC)
+	# Homebrew libomp is often found with flags that then fail to compile/link
+	# under Apple Clang. Probe before attaching the target.
+	if(APPLE AND NOT OpenMP_ROOT)
+		execute_process(
+			COMMAND brew --prefix libomp
+			OUTPUT_VARIABLE _hyperlite_libomp
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			ERROR_QUIET
+		)
+		if(_hyperlite_libomp AND EXISTS "${_hyperlite_libomp}")
+			set(OpenMP_ROOT "${_hyperlite_libomp}")
+		endif()
+	endif()
 	find_package(OpenMP)
 	if(OpenMP_CXX_FOUND)
-		target_link_libraries(hyperlite_engine PUBLIC OpenMP::OpenMP_CXX)
+		include(CheckCXXSourceCompiles)
+		set(_hyperlite_omp_saved_flags "${CMAKE_REQUIRED_FLAGS}")
+		set(_hyperlite_omp_saved_libs "${CMAKE_REQUIRED_LIBRARIES}")
+		set(CMAKE_REQUIRED_FLAGS "${OpenMP_CXX_FLAGS}")
+		set(CMAKE_REQUIRED_LIBRARIES OpenMP::OpenMP_CXX)
+		check_cxx_source_compiles("#include <omp.h>\nint main() { return omp_get_max_threads(); }\n" HYPERLITE_OPENMP_COMPILES)
+		set(CMAKE_REQUIRED_FLAGS "${_hyperlite_omp_saved_flags}")
+		set(CMAKE_REQUIRED_LIBRARIES "${_hyperlite_omp_saved_libs}")
+		if(HYPERLITE_OPENMP_COMPILES)
+			target_link_libraries(hyperlite_engine PUBLIC OpenMP::OpenMP_CXX)
+		else()
+			message(STATUS "OpenMP was found but does not compile; CPU line batches stay serial.")
+		endif()
 	else()
 		if(APPLE)
 			message(STATUS "OpenMP not found (typical with Apple Clang). CPU line batches stay serial. Optional: brew install libomp")
@@ -238,51 +297,55 @@ endif()
 
 if(HYPERLITE_BUILD_PYTHON_BINDINGS)
 	find_package(Python3 COMPONENTS Interpreter Development.Module)
-	if(Python3_FOUND)
-		Python3_add_library(hyperlite_python MODULE bindings/python/src/module.cpp)
-		target_include_directories(hyperlite_python PRIVATE engine/include)
-		target_link_libraries(hyperlite_python PRIVATE hyperlite_engine)
-		target_compile_definitions(hyperlite_python PRIVATE PY_SSIZE_T_CLEAN)
-		set_target_properties(hyperlite_python PROPERTIES OUTPUT_NAME hyperlite PREFIX "")
-		# Ensure a proper extension suffix (.pyd / .cpython-*.so) for import and setuptools.
-		if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-			set_target_properties(hyperlite_python PROPERTIES SUFFIX ".pyd")
-		elseif(DEFINED Python3_SOABI AND NOT Python3_SOABI STREQUAL "")
-			set_target_properties(hyperlite_python PROPERTIES SUFFIX ".${Python3_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}")
-		endif()
-	else()
-		message(WARNING "Python3 development headers not found; skipping bindings.")
+	if(NOT Python3_Development.Module_FOUND)
+		message(FATAL_ERROR
+			"Python development headers (Python.h) not found for '${Python3_EXECUTABLE}'. "
+			"On macOS, /usr/bin/python3 has no headers — use Homebrew (`brew install python`) "
+			"or python.org, then: python3 -m venv .venv && .venv/bin/pip install . "
+			"Or configure with -DHYPERLITE_BUILD_PYTHON_BINDINGS=OFF for C++-only.")
+	endif()
+	Python3_add_library(hyperlite_python MODULE bindings/python/src/module.cpp)
+	target_include_directories(hyperlite_python PRIVATE engine/include)
+	target_link_libraries(hyperlite_python PRIVATE hyperlite_engine)
+	target_compile_definitions(hyperlite_python PRIVATE PY_SSIZE_T_CLEAN)
+	hyperlite_maybe_ipo(hyperlite_python)
+	set_target_properties(hyperlite_python PROPERTIES OUTPUT_NAME hyperlite PREFIX "")
+	# Ensure a proper extension suffix (.pyd / .cpython-*.so) for import and setuptools.
+	if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+		set_target_properties(hyperlite_python PROPERTIES SUFFIX ".pyd")
+	elseif(DEFINED Python3_SOABI AND NOT Python3_SOABI STREQUAL "")
+		set_target_properties(hyperlite_python PROPERTIES SUFFIX ".${Python3_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}")
 	endif()
 endif()
 
 if(HYPERLITE_BUILD_BENCHMARKS)
 	add_executable(primitive_bench benchmarks/primitive_bench.cpp)
 	target_link_libraries(primitive_bench PRIVATE hyperlite_engine)
-	set_property(TARGET primitive_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(primitive_bench)
 
 	add_executable(gpu_scene_bench benchmarks/gpu_scene_bench.cpp)
 	target_link_libraries(gpu_scene_bench PRIVATE hyperlite_engine)
-	set_property(TARGET gpu_scene_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(gpu_scene_bench)
 
 	add_executable(gpu_blit_bench benchmarks/gpu_blit_bench.cpp)
 	target_link_libraries(gpu_blit_bench PRIVATE hyperlite_engine)
-	set_property(TARGET gpu_blit_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(gpu_blit_bench)
 
 	add_executable(cpu_line_bench benchmarks/cpu_line_bench.cpp)
 	target_link_libraries(cpu_line_bench PRIVATE hyperlite_engine)
-	set_property(TARGET cpu_line_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(cpu_line_bench)
 
 	add_executable(cpu_line_3d_bench benchmarks/cpu_line_3d_bench.cpp)
 	target_link_libraries(cpu_line_3d_bench PRIVATE hyperlite_engine)
-	set_property(TARGET cpu_line_3d_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(cpu_line_3d_bench)
 
 	add_executable(cpu_tri_bench benchmarks/cpu_tri_bench.cpp)
 	target_link_libraries(cpu_tri_bench PRIVATE hyperlite_engine)
-	set_property(TARGET cpu_tri_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(cpu_tri_bench)
 
 	add_executable(cpu_mesh_bench benchmarks/cpu_mesh_bench.cpp)
 	target_link_libraries(cpu_mesh_bench PRIVATE hyperlite_engine)
-	set_property(TARGET cpu_mesh_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(cpu_mesh_bench)
 endif()
 
 if(HYPERLITE_BUILD_TESTS)
@@ -290,41 +353,41 @@ if(HYPERLITE_BUILD_TESTS)
 
 	add_executable(reference_render_tests tests/reference_render_tests.cpp)
 	target_link_libraries(reference_render_tests PRIVATE hyperlite_engine)
-	set_property(TARGET reference_render_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(reference_render_tests)
 	add_test(NAME reference_render_tests COMMAND reference_render_tests)
 
 	add_executable(headless_smoke_test tests/headless_smoke_test.cpp)
 	target_link_libraries(headless_smoke_test PRIVATE hyperlite_engine)
-	set_property(TARGET headless_smoke_test PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(headless_smoke_test)
 	add_test(NAME headless_smoke_test COMMAND headless_smoke_test)
 
 	add_executable(depth_wireframe_tests tests/depth_wireframe_tests.cpp)
 	target_link_libraries(depth_wireframe_tests PRIVATE hyperlite_engine)
-	set_property(TARGET depth_wireframe_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(depth_wireframe_tests)
 	add_test(NAME depth_wireframe_tests COMMAND depth_wireframe_tests)
 
 	add_executable(depth_tri_tests tests/depth_tri_tests.cpp)
 	target_link_libraries(depth_tri_tests PRIVATE hyperlite_engine)
-	set_property(TARGET depth_tri_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(depth_tri_tests)
 	add_test(NAME depth_tri_tests COMMAND depth_tri_tests)
 
 	add_executable(mesh_layer_tests tests/mesh_layer_tests.cpp)
 	target_link_libraries(mesh_layer_tests PRIVATE hyperlite_engine)
-	set_property(TARGET mesh_layer_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(mesh_layer_tests)
 	add_test(NAME mesh_layer_tests COMMAND mesh_layer_tests)
 
 	add_executable(mesh_textured_tests tests/mesh_textured_tests.cpp)
 	target_link_libraries(mesh_textured_tests PRIVATE hyperlite_engine)
-	set_property(TARGET mesh_textured_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(mesh_textured_tests)
 	add_test(NAME mesh_textured_tests COMMAND mesh_textured_tests)
 
 	add_executable(game_runtime_tests tests/game_runtime_tests.cpp)
 	target_link_libraries(game_runtime_tests PRIVATE hyperlite_engine)
-	set_property(TARGET game_runtime_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(game_runtime_tests)
 	add_test(NAME game_runtime_tests COMMAND game_runtime_tests)
 
 	add_executable(platform_window_tests tests/platform_window_tests.cpp)
 	target_link_libraries(platform_window_tests PRIVATE hyperlite_engine)
-	set_property(TARGET platform_window_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+	hyperlite_maybe_ipo(platform_window_tests)
 	add_test(NAME platform_window_tests COMMAND platform_window_tests)
 endif()
